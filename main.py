@@ -125,3 +125,36 @@ test_class_counts = count_samples_per_class(test_dataset)
 print("\nTest dataset class distribution:")
 for class_name, count in test_class_counts.items():
     print(f"{class_name}: {count} samples")
+
+
+# %% [markdown]
+# # View Samples
+
+# %%
+def denormalise(image_tensor):
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    image_tensor = image_tensor.cpu()  # Ensure the tensor is on CPU for denormalization
+    image_tensor = image_tensor * std + mean  # Denormalize
+    image_tensor = torch.clamp(image_tensor, 0, 1)  # Clamp values to [0, 1] range
+    return image_tensor
+
+def show_batch(dataloader, class_names, num_images=8):
+    images, labels = next(iter(dataloader))
+    images = images[:num_images]
+    labels = labels[:num_images]
+    
+    images = [denormalise(img) for img in images]
+    
+    plt.figure(figsize=(12, 8))
+    for i in range(num_images):
+        plt.subplot(4, 4, i + 1)
+        plt.imshow(images[i].permute(1, 2, 0))  # Convert from (C, H, W) to (H, W, C) for plotting
+        plt.title(class_names[labels[i]])
+        plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+print("\nShowing a batch of training images:")
+show_batch(train_dataloader, class_names)
+
