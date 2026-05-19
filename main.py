@@ -21,6 +21,7 @@
 import os
 import random
 import torch
+import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
@@ -52,7 +53,7 @@ assert os.path.exists(VALID_DIR), f"Validation directory '{VALID_DIR}' does not 
 assert os.path.exists(TEST_DIR), f"Test directory '{TEST_DIR}' does not exist."
 
 #hyperparameters
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 IMAGE_SIZE = 224
 NUM_WORKERS = 4 # Adjust based on your system's capabilities
 
@@ -158,3 +159,175 @@ def show_batch(dataloader, class_names, num_images=8):
 print("\nShowing a batch of training images:")
 show_batch(train_dataloader, class_names)
 
+
+# %% [markdown]
+# # VGG16
+
+# %%
+class VGG16(nn.Module): # vgg16 configuration C 
+    def __init__(self, num_classes=4):
+        super(VGG16,self).__init__()
+        self.block1 = nn.Sequential(
+            nn.Conv2d(3,64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64,64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.block2 = nn.Sequential(
+            nn.Conv2d(64,128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(128,128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.block3 = nn.Sequential(
+            nn.Conv2d(128,256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256,256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(256,256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.block4 = nn.Sequential(
+            nn.Conv2d(256,512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.block5 = nn.Sequential(
+            nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+
+        self.features = nn.Sequential(
+            self.block1,
+            self.block2,
+            self.block3,
+            self.block4,
+            self.block5
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512*7*7, 4096),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(4096, 4096),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(4096, num_classes),
+            nn.Softmax(dim=1)
+        )
+    def forward(self,x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+
+# %%
+# Train VGG16 with monitoring
+model = VGG16(num_classes=num_classes).to(dv)
+learning_rate = 1e-4  # Increased learning rate
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+num_epochs = 5
+train_losses = []
+
+print("Starting training...")
+for epoch in range(num_epochs):
+    model.train()
+    epoch_loss = 0.0
+    
+    for images, labels in train_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        epoch_loss += loss.item()
+    
+    avg_loss = epoch_loss / len(train_dataloader)
+    train_losses.append(avg_loss)
+    
+    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+
+print("Training complete!")
+print(f"Final training loss: {train_losses[-1]:.4f}")
+
+# %%
+# Evaluate on Validation and Test Data
+model.eval()
+val_preds, val_true = [], []
+test_preds, test_true = [], []
+val_loss, test_loss = 0.0, 0.0
+
+# Validation evaluation
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        val_loss += loss.item()
+        
+        _, predicted = torch.max(outputs.data, 1)
+        val_preds.extend(predicted.cpu().numpy())
+        val_true.extend(labels.cpu().numpy())
+
+val_accuracy = accuracy_score(val_true, val_preds)
+val_precision = precision_score(val_true, val_preds, average='weighted', zero_division=0)
+val_recall = recall_score(val_true, val_preds, average='weighted', zero_division=0)
+val_f1 = f1_score(val_true, val_preds, average='weighted', zero_division=0)
+val_loss /= len(val_dataloader)
+
+print("\nVALIDATION RESULTS")
+print(f"Accuracy:  {val_accuracy:.4f}")
+print(f"Precision: {val_precision:.4f}")
+print(f"Recall:    {val_recall:.4f}")
+print(f"F1-Score:  {val_f1:.4f}")
+print(f"Loss:      {val_loss:.4f}")
+
+# Test evaluation
+with torch.no_grad():
+    for images, labels in test_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        test_loss += loss.item()
+        
+        _, predicted = torch.max(outputs.data, 1)
+        test_preds.extend(predicted.cpu().numpy())
+        test_true.extend(labels.cpu().numpy())
+
+test_accuracy = accuracy_score(test_true, test_preds)
+test_precision = precision_score(test_true, test_preds, average='weighted', zero_division=0)
+test_recall = recall_score(test_true, test_preds, average='weighted', zero_division=0)
+test_f1 = f1_score(test_true, test_preds, average='weighted', zero_division=0)
+test_loss /= len(test_dataloader)
+
+print("\nTEST RESULTS")
+print(f"Accuracy:  {test_accuracy:.4f}")
+print(f"Precision: {test_precision:.4f}")
+print(f"Recall:    {test_recall:.4f}")
+print(f"F1-Score:  {test_f1:.4f}")
+print(f"Loss:      {test_loss:.4f}")
+
+# Confusion Matrices
+print("\nCONFUSION MATRICES")
+print("\nValidation Confusion Matrix:")
+print(confusion_matrix(val_true, val_preds))
+print("\nTest Confusion Matrix:")
+print(confusion_matrix(test_true, test_preds))
