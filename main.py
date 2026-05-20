@@ -223,43 +223,56 @@ class VGG16(nn.Module): # vgg16 configuration C
         super(VGG16,self).__init__()
         self.block1 = nn.Sequential(
             nn.Conv2d(3,64, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
             nn.Conv2d(64,64, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.block2 = nn.Sequential(
             nn.Conv2d(64,128, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
             nn.Conv2d(128,128, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.block3 = nn.Sequential(
             nn.Conv2d(128,256, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
             nn.Conv2d(256,256, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
             nn.Conv2d(256,256, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.block4 = nn.Sequential(
             nn.Conv2d(256,512, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
             nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
             nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.block5 = nn.Sequential(
             nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
             nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
             nn.Conv2d(512,512, kernel_size=3, stride=1, padding=1),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
 
@@ -274,10 +287,12 @@ class VGG16(nn.Module): # vgg16 configuration C
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(512*7*7, 4096),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm1d(4096),
+            nn.ReLU(inplace=True),
             nn.Dropout(p=0.5),
             nn.Linear(4096, 4096),
-           nn.ReLU(inplace=True),
+            nn.BatchNorm1d(4096),
+            nn.ReLU(inplace=True),
             nn.Dropout(p=0.5),
             nn.Linear(4096, num_classes)
         )
@@ -289,9 +304,9 @@ class VGG16(nn.Module): # vgg16 configuration C
 
 # %%
 vgg16 = VGG16(num_classes=num_classes).to(dv)
-learning_rate = 1e-2  # Start with higher learning rate
+learning_rate = 1e-3  # Higher LR for training from scratch with batch norm
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(vgg16.parameters(), lr=learning_rate)
+optimizer = torch.optim.SGD(vgg16.parameters(), lr=learning_rate, momentum=0.9)
 
 # Learning rate scheduler: reduce LR when validation loss plateaus
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -299,16 +314,11 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     min_lr=1e-6
 )
 
-# Early stopping parameters
-patience = 5
-best_val_loss = float('inf')
-patience_counter = 0
-
 num_epochs = 50
 train_losses = []
 val_losses = []
 
-print("Starting VGG16 training with early stopping and learning rate scheduling...")
+print("Starting VGG16 training with variable learning rate scheduling...")
 for epoch in range(num_epochs):
     # Training phase
     vgg16.train()
@@ -344,24 +354,13 @@ for epoch in range(num_epochs):
     # Learning rate scheduler step
     scheduler.step(avg_val_loss)
     
-    # Early stopping check
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        patience_counter = 0
-    else:
-        patience_counter += 1
-    
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}")
     
-    if patience_counter >= patience:
-        print(f"Early stopping triggered at epoch {epoch+1}. Best validation loss: {best_val_loss:.4f}")
-        break
-
 print("Training complete!")
 print(f"Final training loss: {train_losses[-1]:.4f}")
-print(f"Best validation loss: {best_val_loss:.4f}")
+print(f"Final validation loss: {val_losses[-1]:.4f}")
 
 
 # %% [markdown]
@@ -458,7 +457,7 @@ class DenseNet121(nn.Module):
 # %%
 # Train DenseNet121
 model = DenseNet121(num_blocks=[6, 12, 24, 16], growth_rate=32, num_classes=num_classes).to(dv)
-learning_rate = 1e-3  # Start with higher learning rate
+learning_rate = 1e-3  # Higher LR for training from scratch
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -468,16 +467,11 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     min_lr=1e-6
 )
 
-# Early stopping parameters
-patience = 5
-best_val_loss = float('inf')
-patience_counter = 0
-
 num_epochs = 50
 train_losses = []
 val_losses = []
 
-print("Starting DenseNet121 training with early stopping and learning rate scheduling...")
+print("Starting DenseNet121 training with variable learning rate scheduling...")
 for epoch in range(num_epochs):
     # Training phase
     model.train()
@@ -513,24 +507,13 @@ for epoch in range(num_epochs):
     # Learning rate scheduler step
     scheduler.step(avg_val_loss)
     
-    # Early stopping check
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        patience_counter = 0
-    else:
-        patience_counter += 1
-    
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}")
-    
-    if patience_counter >= patience:
-        print(f"Early stopping triggered at epoch {epoch+1}. Best validation loss: {best_val_loss:.4f}")
-        break
 
 print("Training complete!")
 print(f"Final training loss: {train_losses[-1]:.4f}")
-print(f"Best validation loss: {best_val_loss:.4f}")
+print(f"Final validation loss: {val_losses[-1]:.4f}")
 
 
 # %%
