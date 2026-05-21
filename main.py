@@ -317,6 +317,8 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 num_epochs = 50
 train_losses = []
 val_losses = []
+best_val_accuracy = 0.0
+best_model_path = "best_vgg16.pth"
 
 print("Starting VGG16 training with variable learning rate scheduling...")
 for epoch in range(num_epochs):
@@ -341,26 +343,46 @@ for epoch in range(num_epochs):
     # Validation phase
     vgg16.eval()
     val_epoch_loss = 0.0
+    val_preds, val_true = [], []
     with torch.no_grad():
         for images, labels in val_dataloader:
             images, labels = images.to(dv), labels.to(dv)
             outputs = vgg16(images)
             loss = criterion(outputs, labels)
             val_epoch_loss += loss.item()
+            
+            _, predicted = torch.max(outputs.data, 1)
+            val_preds.extend(predicted.cpu().numpy())
+            val_true.extend(labels.cpu().numpy())
     
     avg_val_loss = val_epoch_loss / len(val_dataloader)
     val_losses.append(avg_val_loss)
+    
+    # Calculate validation accuracy
+    val_accuracy = accuracy_score(val_true, val_preds)
+    
+    # Save model if validation accuracy improves
+    if val_accuracy > best_val_accuracy:
+        best_val_accuracy = val_accuracy
+        torch.save(vgg16.state_dict(), best_model_path)
+        print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
     
     # Learning rate scheduler step
     scheduler.step(avg_val_loss)
     
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
     
 print("Training complete!")
 print(f"Final training loss: {train_losses[-1]:.4f}")
 print(f"Final validation loss: {val_losses[-1]:.4f}")
+print(f"Best validation accuracy: {best_val_accuracy:.4f}")
+
+# Load best model
+print(f"\nLoading best VGG16 model from {best_model_path}...")
+vgg16.load_state_dict(torch.load(best_model_path))
+print("Best model loaded!")
 
 
 # %% [markdown]
@@ -470,6 +492,8 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 num_epochs = 50
 train_losses = []
 val_losses = []
+best_val_accuracy = 0.0
+best_model_path = "best_densenet121.pth"
 
 print("Starting DenseNet121 training with variable learning rate scheduling...")
 for epoch in range(num_epochs):
@@ -494,26 +518,46 @@ for epoch in range(num_epochs):
     # Validation phase
     model.eval()
     val_epoch_loss = 0.0
+    val_preds, val_true = [], []
     with torch.no_grad():
         for images, labels in val_dataloader:
             images, labels = images.to(dv), labels.to(dv)
             outputs = model(images)
             loss = criterion(outputs, labels)
             val_epoch_loss += loss.item()
+            
+            _, predicted = torch.max(outputs.data, 1)
+            val_preds.extend(predicted.cpu().numpy())
+            val_true.extend(labels.cpu().numpy())
     
     avg_val_loss = val_epoch_loss / len(val_dataloader)
     val_losses.append(avg_val_loss)
+    
+    # Calculate validation accuracy
+    val_accuracy = accuracy_score(val_true, val_preds)
+    
+    # Save model if validation accuracy improves
+    if val_accuracy > best_val_accuracy:
+        best_val_accuracy = val_accuracy
+        torch.save(model.state_dict(), best_model_path)
+        print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
     
     # Learning rate scheduler step
     scheduler.step(avg_val_loss)
     
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
 
 print("Training complete!")
 print(f"Final training loss: {train_losses[-1]:.4f}")
 print(f"Final validation loss: {val_losses[-1]:.4f}")
+print(f"Best validation accuracy: {best_val_accuracy:.4f}")
+
+# Load best model
+print(f"\nLoading best DenseNet121 model from {best_model_path}...")
+model.load_state_dict(torch.load(best_model_path))
+print("Best model loaded!")
 
 
 # %%
