@@ -55,7 +55,7 @@ TEST_RATIO = 0.15
 #hyperparameters
 BATCH_SIZE = 32
 IMAGE_SIZE = 224
-NUM_WORKERS = 4 # Adjust based on your system's capabilities
+NUM_WORKERS = 0 # Adjust based on your system's capabilities
 
 
 # %% [markdown]
@@ -64,25 +64,40 @@ NUM_WORKERS = 4 # Adjust based on your system's capabilities
 # %%
 train_transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(degrees=15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.RandAugment(num_ops=10, magnitude=3),  # Apply BEFORE ToTensor (operates on PIL images)
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Using ImageNet stats for normalization
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
 val_test_transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Using ImageNet stats for normalization
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
+
 
 # %% [markdown]
 # # Load Datasets
 
 # %%
-# Load all data without transforms first to split
-full_dataset = datasets.ImageFolder(root=DATASET_DIR, transform=transforms.ToTensor())
+# Custom Subset class to avoid transform leakage
+class CustomSubset(torch.utils.data.Dataset):
+    def __init__(self, dataset, indices, transform=None):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform if transform is not None else transforms.ToTensor()
+    
+    def __getitem__(self, idx):
+        image, label = self.dataset[self.indices[idx]]
+        # Always apply transform - guaranteed to return tensor
+        image = self.transform(image)
+        return image, label
+    
+    def __len__(self):
+        return len(self.indices)
+
+# Load all data WITHOUT transforms (need PIL images for RandAugment)
+full_dataset = datasets.ImageFolder(root=DATASET_DIR, transform=None)
 class_names = full_dataset.classes
 num_classes = len(class_names)
 print(f"Classes: {class_names}")
@@ -95,21 +110,23 @@ train_size = int(total_size * TRAIN_RATIO)
 valid_size = int(total_size * VALID_RATIO)
 test_size = total_size - train_size - valid_size
 
-train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-    full_dataset, 
-    [train_size, valid_size, test_size],
-    generator=torch.Generator().manual_seed(SEED)
-)
+# Create indices for random split
+generator = torch.Generator().manual_seed(SEED)
+indices = torch.randperm(total_size, generator=generator).tolist()
+train_indices = indices[:train_size]
+val_indices = indices[train_size:train_size + valid_size]
+test_indices = indices[train_size + valid_size:]
+
+# Use CustomSubset to apply transforms independently (NO LEAKAGE)
+train_dataset = CustomSubset(full_dataset, train_indices, transform=train_transform)
+val_dataset = CustomSubset(full_dataset, val_indices, transform=val_test_transform)
+test_dataset = CustomSubset(full_dataset, test_indices, transform=val_test_transform)
 
 print(f"\nDataset split:")
 print(f"  Training: {len(train_dataset)} samples ({TRAIN_RATIO*100:.0f}%)")
 print(f"  Validation: {len(val_dataset)} samples ({VALID_RATIO*100:.0f}%)")
 print(f"  Test: {len(test_dataset)} samples ({TEST_RATIO*100:.0f}%)")
 
-# Apply transforms: augmentation for training, no augmentation for val/test
-train_dataset.dataset.transform = train_transform
-val_dataset.dataset.transform = val_test_transform
-test_dataset.dataset.transform = val_test_transform
 
 # %% [markdown]
 # # Create DataLoaders
@@ -301,6 +318,11 @@ class VGG16(nn.Module): # vgg16 configuration C
         x = self.classifier(x)
         return x
 vgg16 = VGG16(num_classes=num_classes).to(dv)
+if os.path.exists("best_vgg16.pth"):
+    vgg16.load_state_dict(torch.load("best_vgg16.pth"))
+    print("Loaded best_vgg16.pth")
+else:
+    print("best_vgg16.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 # %%
@@ -310,14 +332,26 @@ optimizer = torch.optim.SGD(vgg16.parameters(), lr=learning_rate, momentum=0.9)
 
 # Learning rate scheduler: reduce LR when validation loss plateaus
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3, 
+    optimizer, mode='min', factor=0.7, patience=5, 
     min_lr=1e-6
 )
+
+# Evaluate loaded model to establish baseline
+vgg16.eval()
+baseline_preds, baseline_true = [], []
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = vgg16(images)
+        _, predicted = torch.max(outputs.data, 1)
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
 
 num_epochs = 50
 train_losses = []
 val_losses = []
-best_val_accuracy = 0.0
 best_model_path = "best_vgg16.pth"
 
 print("Starting VGG16 training with variable learning rate scheduling...")
@@ -470,24 +504,40 @@ class DenseNet121(nn.Module):
         x = self.classifier(x)
         return x
 densenet121 = DenseNet121(num_blocks=[6, 12, 24, 16], growth_rate=32, num_classes=num_classes).to(dv)
+if os.path.exists("best_densenet121.pth"):
+    densenet121.load_state_dict(torch.load("best_densenet121.pth"))
+    print("Loaded best_densenet121.pth")
+else:
+    print("best_densenet121.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 
 # %%
 # Train DenseNet121
-learning_rate = 1e-3  # Higher LR for training from scratch
-optimizer = torch.optim.Adam(densenet121.parameters(), lr=learning_rate)
+learning_rate = 1e-3
+optimizer = torch.optim.SGD(densenet121.parameters(), lr=learning_rate, momentum=0.9)
 
-# Learning rate scheduler: reduce LR when validation loss plateaus
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3,
+    optimizer, mode='min', factor=0.7, patience=5, 
     min_lr=1e-6
 )
 
-num_epochs = 100
+# Evaluate loaded model to establish baseline
+densenet121.eval()
+baseline_preds, baseline_true = [], []
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = densenet121(images)
+        _, predicted = torch.max(outputs.data, 1)
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
+
+num_epochs = 50
 train_losses = []
 val_losses = []
-best_val_accuracy = 0.0
 best_model_path = "best_densenet121.pth"
 
 print("Starting DenseNet121 training with variable learning rate scheduling...")
@@ -675,9 +725,11 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
         'test_loss': test_loss
     }
 
-# Evaluate the DenseNet121 model
-vgg16.load_state_dict(torch.load("./saved/best_vgg16.pth"))
-densenet121.load_state_dict(torch.load("./saved/best_densenet121.pth"))
+# Evaluate the models
+if os.path.exists("best_vgg16.pth"):
+    vgg16.load_state_dict(torch.load("best_vgg16.pth"))
+if os.path.exists("best_densenet121.pth"):
+    densenet121.load_state_dict(torch.load("best_densenet121.pth"))
 vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
 densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
 
