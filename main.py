@@ -300,12 +300,12 @@ class VGG16(nn.Module): # vgg16 configuration C
         x = self.features(x)
         x = self.classifier(x)
         return x
-
+vgg16 = VGG16(num_classes=num_classes).to(dv)
+criterion = nn.CrossEntropyLoss()
 
 # %%
-vgg16 = VGG16(num_classes=num_classes).to(dv)
+
 learning_rate = 1e-3  # Higher LR for training from scratch with batch norm
-criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.SGD(vgg16.parameters(), lr=learning_rate, momentum=0.9)
 
 # Learning rate scheduler: reduce LR when validation loss plateaus
@@ -379,10 +379,6 @@ print(f"Final training loss: {train_losses[-1]:.4f}")
 print(f"Final validation loss: {val_losses[-1]:.4f}")
 print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 
-# Load best model
-print(f"\nLoading best VGG16 model from {best_model_path}...")
-vgg16.load_state_dict(torch.load(best_model_path))
-print("Best model loaded!")
 
 
 # %% [markdown]
@@ -473,15 +469,14 @@ class DenseNet121(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
-        
+densenet121 = DenseNet121(num_blocks=[6, 12, 24, 16], growth_rate=32, num_classes=num_classes).to(dv)
+criterion = nn.CrossEntropyLoss()
 
 
 # %%
 # Train DenseNet121
-model = DenseNet121(num_blocks=[6, 12, 24, 16], growth_rate=32, num_classes=num_classes).to(dv)
 learning_rate = 1e-3  # Higher LR for training from scratch
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.Adam(densenet121.parameters(), lr=learning_rate)
 
 # Learning rate scheduler: reduce LR when validation loss plateaus
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -489,7 +484,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     min_lr=1e-6
 )
 
-num_epochs = 50
+num_epochs = 100
 train_losses = []
 val_losses = []
 best_val_accuracy = 0.0
@@ -498,12 +493,12 @@ best_model_path = "best_densenet121.pth"
 print("Starting DenseNet121 training with variable learning rate scheduling...")
 for epoch in range(num_epochs):
     # Training phase
-    model.train()
+    densenet121.train()
     epoch_loss = 0.0
     
     for images, labels in train_dataloader:
         images, labels = images.to(dv), labels.to(dv)
-        outputs = model(images)
+        outputs = densenet121(images)
         loss = criterion(outputs, labels)
         
         optimizer.zero_grad()
@@ -516,13 +511,13 @@ for epoch in range(num_epochs):
     train_losses.append(avg_train_loss)
     
     # Validation phase
-    model.eval()
+    densenet121.eval()
     val_epoch_loss = 0.0
     val_preds, val_true = [], []
     with torch.no_grad():
         for images, labels in val_dataloader:
             images, labels = images.to(dv), labels.to(dv)
-            outputs = model(images)
+            outputs = densenet121(images)
             loss = criterion(outputs, labels)
             val_epoch_loss += loss.item()
             
@@ -539,7 +534,7 @@ for epoch in range(num_epochs):
     # Save model if validation accuracy improves
     if val_accuracy > best_val_accuracy:
         best_val_accuracy = val_accuracy
-        torch.save(model.state_dict(), best_model_path)
+        torch.save(densenet121.state_dict(), best_model_path)
         print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
     
     # Learning rate scheduler step
@@ -553,11 +548,6 @@ print("Training complete!")
 print(f"Final training loss: {train_losses[-1]:.4f}")
 print(f"Final validation loss: {val_losses[-1]:.4f}")
 print(f"Best validation accuracy: {best_val_accuracy:.4f}")
-
-# Load best model
-print(f"\nLoading best DenseNet121 model from {best_model_path}...")
-model.load_state_dict(torch.load(best_model_path))
-print("Best model loaded!")
 
 
 # %%
@@ -686,8 +676,10 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
     }
 
 # Evaluate the DenseNet121 model
+vgg16.load_state_dict(torch.load("./saved/best_vgg16.pth"))
+densenet121.load_state_dict(torch.load("./saved/best_densenet121.pth"))
 vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
-densenet_results = evaluate_model(model, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
+densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
 # %%
