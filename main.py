@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: cv_venv (3.14.4)
 #     language: python
@@ -600,46 +600,38 @@ print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 
 
 # %% [markdown]
-# # ResNet50
+# # ResNet18
 
 # %%
-class ResidualBlock(nn.Module):
+class BasicBlock(nn.Module):
     """
-    Bottleneck residual block used in ResNet50/101/152.
-    Reduces parameters by using 1x1 -> 3x3 -> 1x1 conv sequence.
-    expansion=4 means the output channels are 4x the base width.
+    Basic residual block used in ResNet18/34.
+    Two 3x3 convs with a skip connection. No bottleneck.
+    expansion=1 because output channels == input channels (no expansion).
     """
-    expansion = 4
+    expansion = 1
 
     def __init__(self, in_channels, out_channels, stride=1, downsample=None):
-        super(ResidualBlock, self).__init__()
+        super(BasicBlock, self).__init__()
 
-        # 1x1 conv to reduce channels
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        # First 3x3 conv (stride applied here for spatial downsampling)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3,
+                               stride=stride, padding=1, bias=False)
         self.bn1   = nn.BatchNorm2d(out_channels)
 
-        # 3x3 conv (stride applied here for spatial downsampling)
+        # Second 3x3 conv (always stride=1, no further downsampling)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
-                               stride=stride, padding=1, bias=False)
+                               stride=1, padding=1, bias=False)
         self.bn2   = nn.BatchNorm2d(out_channels)
 
-        # 1x1 conv to expand channels back (out_channels * 4)
-        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion,
-                               kernel_size=1, bias=False)
-        self.bn3   = nn.BatchNorm2d(out_channels * self.expansion)
-
-        self.relu  = nn.ReLU(inplace=True)
-
-        # Downsample shortcut: needed when dimensions change so residual
-        # connection shapes match the main path output
+        self.relu       = nn.ReLU(inplace=True)
         self.downsample = downsample
 
     def forward(self, x):
         identity = x
 
         out = self.relu(self.bn1(self.conv1(x)))
-        out = self.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))          # No ReLU before adding residual
+        out = self.bn2(self.conv2(out))         # No ReLU before skip addition
 
         if self.downsample is not None:
             identity = self.downsample(x)
@@ -649,17 +641,17 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class ResNet50(nn.Module):
+class ResNet18(nn.Module):
     """
-    ResNet50: 4 stages with [3, 4, 6, 3] bottleneck blocks.
+    ResNet18: 4 stages with [2, 2, 2, 2] basic blocks.
     Input: (B, 3, 224, 224) -> Output: (B, num_classes)
     """
     def __init__(self, num_classes=4):
-        super(ResNet50, self).__init__()
+        super(ResNet18, self).__init__()
 
         self.in_channels = 64
 
-        # Stem: initial 7x7 conv + maxpool (224 -> 56)
+        # Stem: 7x7 conv + maxpool (224 -> 56)
         self.stem = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(64),
@@ -667,21 +659,21 @@ class ResNet50(nn.Module):
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         )
 
-        # 4 residual stages
-        # Stage 1: no spatial downsampling (stride=1), 64 base -> 256 out channels
-        self.layer1 = self._make_layer(out_channels=64,  num_blocks=3, stride=1)
-        # Stage 2: spatial downsampling (stride=2), 128 base -> 512 out channels
-        self.layer2 = self._make_layer(out_channels=128, num_blocks=4, stride=2)
-        # Stage 3: spatial downsampling (stride=2), 256 base -> 1024 out channels
-        self.layer3 = self._make_layer(out_channels=256, num_blocks=6, stride=2)
-        # Stage 4: spatial downsampling (stride=2), 512 base -> 2048 out channels
-        self.layer4 = self._make_layer(out_channels=512, num_blocks=3, stride=2)
+        # 4 residual stages — [2,2,2,2] blocks, channels double each stage
+        self.layer1 = self._make_layer(out_channels=64,  num_blocks=2, stride=1)
+        self.layer2 = self._make_layer(out_channels=128, num_blocks=2, stride=2)
+        self.layer3 = self._make_layer(out_channels=256, num_blocks=2, stride=2)
+        self.layer4 = self._make_layer(out_channels=512, num_blocks=2, stride=2)
 
         # Head
         self.avgpool    = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Linear(512 * ResidualBlock.expansion, num_classes)
+        # expansion=1 so final feature vector is 512, not 2048
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=0.3),   # Light dropout: helps on small datasets
+            nn.Linear(512 * BasicBlock.expansion, num_classes)
+        )
 
-        # Weight initialization
+        # Kaiming initialization
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -690,28 +682,20 @@ class ResNet50(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def _make_layer(self, out_channels, num_blocks, stride):
-        """
-        Builds one residual stage.
-        The first block handles any change in spatial size or channel count
-        via a downsample shortcut. Remaining blocks keep dimensions unchanged.
-        """
         downsample = None
 
-        # Downsample shortcut needed if stride != 1 (spatial change)
-        # or if channels don't match (first block of each stage)
-        if stride != 1 or self.in_channels != out_channels * ResidualBlock.expansion:
+        if stride != 1 or self.in_channels != out_channels * BasicBlock.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels * ResidualBlock.expansion,
+                nn.Conv2d(self.in_channels, out_channels * BasicBlock.expansion,
                           kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels * ResidualBlock.expansion)
+                nn.BatchNorm2d(out_channels * BasicBlock.expansion)
             )
 
-        layers = [ResidualBlock(self.in_channels, out_channels, stride, downsample)]
-        self.in_channels = out_channels * ResidualBlock.expansion
+        layers = [BasicBlock(self.in_channels, out_channels, stride, downsample)]
+        self.in_channels = out_channels * BasicBlock.expansion
 
-        # Remaining blocks: stride=1, no downsampling needed
         for _ in range(1, num_blocks):
-            layers.append(ResidualBlock(self.in_channels, out_channels))
+            layers.append(BasicBlock(self.in_channels, out_channels))
 
         return nn.Sequential(*layers)
 
@@ -727,72 +711,69 @@ class ResNet50(nn.Module):
         return x
 
 
-resnet50 = ResNet50(num_classes=num_classes).to(dv)
-if os.path.exists("best_resnet50.pth"):
-    resnet50.load_state_dict(torch.load("best_resnet50.pth"))
-    print("Loaded best_resnet50.pth")
-else:
-    print("best_resnet50.pth not found, training from scratch")
+resnet18 = ResNet18(num_classes=num_classes).to(dv)
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
 # ## Training
 
 # %%
-learning_rate = 1e-3
-optimizer = torch.optim.SGD(resnet50.parameters(), lr=learning_rate, momentum=0.9)
+learning_rate = 1e-2
+optimizer = torch.optim.SGD(
+    resnet18.parameters(),
+    lr=learning_rate,
+    momentum=0.9,
+    weight_decay=1e-4
+)
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.7, patience=5, 
-    min_lr=1e-6
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=100, eta_min=1e-6
 )
 
 # Evaluate loaded model to establish baseline
-resnet50.eval()
+resnet18.eval()
 baseline_preds, baseline_true = [], []
 with torch.no_grad():
     for images, labels in val_dataloader:
         images, labels = images.to(dv), labels.to(dv)
-        outputs = resnet50(images)
+        outputs = resnet18(images)
         _, predicted = torch.max(outputs.data, 1)
         baseline_preds.extend(predicted.cpu().numpy())
         baseline_true.extend(labels.cpu().numpy())
 best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
 print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
 
-num_epochs = 50
+num_epochs = 100
 train_losses = []
 val_losses = []
-best_model_path = "best_resnet50.pth"
+best_model_path = "best_resnet18.pth"
 
-print("Starting ResNet50 training...")
+print("Starting ResNet18 training...")
 for epoch in range(num_epochs):
-    # Training phase
-    resnet50.train()
+    resnet18.train()
     epoch_loss = 0.0
 
     for images, labels in train_dataloader:
         images, labels = images.to(dv), labels.to(dv)
-        outputs = resnet50(images)
+        outputs = resnet18(images)
         loss = criterion(outputs, labels)
 
         optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(resnet18.parameters(), max_norm=1.0)
         optimizer.step()
-
         epoch_loss += loss.item()
 
     avg_train_loss = epoch_loss / len(train_dataloader)
     train_losses.append(avg_train_loss)
 
-    # Validation phase
-    resnet50.eval()
+    resnet18.eval()
     val_epoch_loss = 0.0
     val_preds, val_true = [], []
     with torch.no_grad():
         for images, labels in val_dataloader:
             images, labels = images.to(dv), labels.to(dv)
-            outputs = resnet50(images)
+            outputs = resnet18(images)
             loss = criterion(outputs, labels)
             val_epoch_loss += loss.item()
 
@@ -807,10 +788,10 @@ for epoch in range(num_epochs):
 
     if val_accuracy > best_val_accuracy:
         best_val_accuracy = val_accuracy
-        torch.save(resnet50.state_dict(), best_model_path)
+        torch.save(resnet18.state_dict(), best_model_path)
         print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
 
-    scheduler.step(avg_val_loss)
+    scheduler.step()
 
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
@@ -954,11 +935,11 @@ if os.path.exists("best_vgg16.pth"):
     vgg16.load_state_dict(torch.load("best_vgg16.pth"))
 if os.path.exists("best_densenet121.pth"):
     densenet121.load_state_dict(torch.load("best_densenet121.pth"))
-if os.path.exists("best_resnet50.pth"):
-    resnet50.load_state_dict(torch.load("best_resnet50.pth"))
+if os.path.exists("best_resnet18.pth"):
+    resnet18.load_state_dict(torch.load("best_resnet18.pth"))
 vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
 densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
-resnet50_results = evaluate_model(resnet50, "ResNet50", val_dataloader, test_dataloader, criterion, dv, class_names)
+resnet18_results = evaluate_model(resnet18, "ResNet18", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
 # %%
