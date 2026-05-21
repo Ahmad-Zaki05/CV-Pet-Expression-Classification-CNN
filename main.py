@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: cv_venv (3.14.4)
 #     language: python
@@ -728,6 +728,11 @@ class ResNet50(nn.Module):
 
 
 resnet50 = ResNet50(num_classes=num_classes).to(dv)
+if os.path.exists("best_resnet50.pth"):
+    resnet50.load_state_dict(torch.load("best_resnet50.pth"))
+    print("Loaded best_resnet50.pth")
+else:
+    print("best_resnet50.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
@@ -735,18 +740,29 @@ criterion = nn.CrossEntropyLoss()
 
 # %%
 learning_rate = 1e-3
-optimizer = torch.optim.SGD(resnet50.parameters(), lr=learning_rate,
-                             momentum=0.9, weight_decay=1e-4)
+optimizer = torch.optim.SGD(resnet50.parameters(), lr=learning_rate, momentum=0.9)
 
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3,
+    optimizer, mode='min', factor=0.7, patience=5, 
     min_lr=1e-6
 )
+
+# Evaluate loaded model to establish baseline
+resnet50.eval()
+baseline_preds, baseline_true = [], []
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = resnet50(images)
+        _, predicted = torch.max(outputs.data, 1)
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
 
 num_epochs = 50
 train_losses = []
 val_losses = []
-best_val_accuracy = 0.0
 best_model_path = "best_resnet50.pth"
 
 print("Starting ResNet50 training...")
@@ -938,9 +954,10 @@ if os.path.exists("best_vgg16.pth"):
     vgg16.load_state_dict(torch.load("best_vgg16.pth"))
 if os.path.exists("best_densenet121.pth"):
     densenet121.load_state_dict(torch.load("best_densenet121.pth"))
+if os.path.exists("best_resnet50.pth"):
+    resnet50.load_state_dict(torch.load("best_resnet50.pth"))
 vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
 densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
-resnet50.load_state_dict(torch.load("./saved/best_resnet50.pth"))
 resnet50_results = evaluate_model(resnet50, "ResNet50", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
