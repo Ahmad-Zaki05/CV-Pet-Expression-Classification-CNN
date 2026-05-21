@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: cv_venv (3.14.4)
 #     language: python
@@ -55,6 +55,7 @@ TEST_RATIO = 0.15
 #hyperparameters
 BATCH_SIZE = 32
 IMAGE_SIZE = 224
+NUM_WORKERS = 0 # Adjust based on your system's capabilities
 
 
 # %% [markdown]
@@ -63,25 +64,40 @@ IMAGE_SIZE = 224
 # %%
 train_transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(degrees=15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+    transforms.RandAugment(num_ops=10, magnitude=3),  # Apply BEFORE ToTensor (operates on PIL images)
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Using ImageNet stats for normalization
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
 val_test_transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]), # Using ImageNet stats for normalization
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
+
 
 # %% [markdown]
 # # Load Datasets
 
 # %%
-# Load all data without transforms first to split
-full_dataset = datasets.ImageFolder(root=DATASET_DIR, transform=transforms.ToTensor())
+# Custom Subset class to avoid transform leakage
+class CustomSubset(torch.utils.data.Dataset):
+    def __init__(self, dataset, indices, transform=None):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform if transform is not None else transforms.ToTensor()
+    
+    def __getitem__(self, idx):
+        image, label = self.dataset[self.indices[idx]]
+        # Always apply transform - guaranteed to return tensor
+        image = self.transform(image)
+        return image, label
+    
+    def __len__(self):
+        return len(self.indices)
+
+# Load all data WITHOUT transforms (need PIL images for RandAugment)
+full_dataset = datasets.ImageFolder(root=DATASET_DIR, transform=None)
 class_names = full_dataset.classes
 num_classes = len(class_names)
 print(f"Classes: {class_names}")
@@ -94,21 +110,23 @@ train_size = int(total_size * TRAIN_RATIO)
 valid_size = int(total_size * VALID_RATIO)
 test_size = total_size - train_size - valid_size
 
-train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-    full_dataset, 
-    [train_size, valid_size, test_size],
-    generator=torch.Generator().manual_seed(SEED)
-)
+# Create indices for random split
+generator = torch.Generator().manual_seed(SEED)
+indices = torch.randperm(total_size, generator=generator).tolist()
+train_indices = indices[:train_size]
+val_indices = indices[train_size:train_size + valid_size]
+test_indices = indices[train_size + valid_size:]
+
+# Use CustomSubset to apply transforms independently (NO LEAKAGE)
+train_dataset = CustomSubset(full_dataset, train_indices, transform=train_transform)
+val_dataset = CustomSubset(full_dataset, val_indices, transform=val_test_transform)
+test_dataset = CustomSubset(full_dataset, test_indices, transform=val_test_transform)
 
 print(f"\nDataset split:")
 print(f"  Training: {len(train_dataset)} samples ({TRAIN_RATIO*100:.0f}%)")
 print(f"  Validation: {len(val_dataset)} samples ({VALID_RATIO*100:.0f}%)")
 print(f"  Test: {len(test_dataset)} samples ({TEST_RATIO*100:.0f}%)")
 
-# Apply transforms: augmentation for training, no augmentation for val/test
-train_dataset.dataset.transform = train_transform
-val_dataset.dataset.transform = val_test_transform
-test_dataset.dataset.transform = val_test_transform
 
 # %% [markdown]
 # # Create DataLoaders
@@ -300,6 +318,11 @@ class VGG16(nn.Module): # vgg16 configuration C
         x = self.classifier(x)
         return x
 vgg16 = VGG16(num_classes=num_classes).to(dv)
+if os.path.exists("best_vgg16.pth"):
+    vgg16.load_state_dict(torch.load("best_vgg16.pth"))
+    print("Loaded best_vgg16.pth")
+else:
+    print("best_vgg16.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 # %%
@@ -309,14 +332,26 @@ optimizer = torch.optim.SGD(vgg16.parameters(), lr=learning_rate, momentum=0.9)
 
 # Learning rate scheduler: reduce LR when validation loss plateaus
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3, 
+    optimizer, mode='min', factor=0.7, patience=5, 
     min_lr=1e-6
 )
+
+# Evaluate loaded model to establish baseline
+vgg16.eval()
+baseline_preds, baseline_true = [], []
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = vgg16(images)
+        _, predicted = torch.max(outputs.data, 1)
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
 
 num_epochs = 50
 train_losses = []
 val_losses = []
-best_val_accuracy = 0.0
 best_model_path = "best_vgg16.pth"
 
 print("Starting VGG16 training with variable learning rate scheduling...")
@@ -468,24 +503,40 @@ class DenseNet121(nn.Module):
         x = self.classifier(x)
         return x
 densenet121 = DenseNet121(num_blocks=[6, 12, 24, 16], growth_rate=32, num_classes=num_classes).to(dv)
+if os.path.exists("best_densenet121.pth"):
+    densenet121.load_state_dict(torch.load("best_densenet121.pth"))
+    print("Loaded best_densenet121.pth")
+else:
+    print("best_densenet121.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 
 # %%
 # Train DenseNet121
-learning_rate = 1e-3  # Higher LR for training from scratch
-optimizer = torch.optim.Adam(densenet121.parameters(), lr=learning_rate)
+learning_rate = 1e-3
+optimizer = torch.optim.SGD(densenet121.parameters(), lr=learning_rate, momentum=0.9)
 
-# Learning rate scheduler: reduce LR when validation loss plateaus
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3,
+    optimizer, mode='min', factor=0.7, patience=5, 
     min_lr=1e-6
 )
 
-num_epochs = 100
+# Evaluate loaded model to establish baseline
+densenet121.eval()
+baseline_preds, baseline_true = [], []
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = densenet121(images)
+        _, predicted = torch.max(outputs.data, 1)
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
+
+num_epochs = 50
 train_losses = []
 val_losses = []
-best_val_accuracy = 0.0
 best_model_path = "best_densenet121.pth"
 
 print("Starting DenseNet121 training with variable learning rate scheduling...")
@@ -549,38 +600,46 @@ print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 
 
 # %% [markdown]
-# # ResNet18
+# # ResNet50
 
 # %%
-class BasicBlock(nn.Module):
+class ResidualBlock(nn.Module):
     """
-    Basic residual block used in ResNet18/34.
-    Two 3x3 convs with a skip connection. No bottleneck.
-    expansion=1 because output channels == input channels (no expansion).
+    Bottleneck residual block used in ResNet50/101/152.
+    Reduces parameters by using 1x1 -> 3x3 -> 1x1 conv sequence.
+    expansion=4 means the output channels are 4x the base width.
     """
-    expansion = 1
+    expansion = 4
 
     def __init__(self, in_channels, out_channels, stride=1, downsample=None):
-        super(BasicBlock, self).__init__()
+        super(ResidualBlock, self).__init__()
 
-        # First 3x3 conv (stride applied here for spatial downsampling)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                               stride=stride, padding=1, bias=False)
+        # 1x1 conv to reduce channels
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
         self.bn1   = nn.BatchNorm2d(out_channels)
 
-        # Second 3x3 conv (always stride=1, no further downsampling)
+        # 3x3 conv (stride applied here for spatial downsampling)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
-                               stride=1, padding=1, bias=False)
+                               stride=stride, padding=1, bias=False)
         self.bn2   = nn.BatchNorm2d(out_channels)
 
-        self.relu       = nn.ReLU(inplace=True)
+        # 1x1 conv to expand channels back (out_channels * 4)
+        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion,
+                               kernel_size=1, bias=False)
+        self.bn3   = nn.BatchNorm2d(out_channels * self.expansion)
+
+        self.relu  = nn.ReLU(inplace=True)
+
+        # Downsample shortcut: needed when dimensions change so residual
+        # connection shapes match the main path output
         self.downsample = downsample
 
     def forward(self, x):
         identity = x
 
         out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))         # No ReLU before skip addition
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))          # No ReLU before adding residual
 
         if self.downsample is not None:
             identity = self.downsample(x)
@@ -590,17 +649,17 @@ class BasicBlock(nn.Module):
         return out
 
 
-class ResNet18(nn.Module):
+class ResNet50(nn.Module):
     """
-    ResNet18: 4 stages with [2, 2, 2, 2] basic blocks.
+    ResNet50: 4 stages with [3, 4, 6, 3] bottleneck blocks.
     Input: (B, 3, 224, 224) -> Output: (B, num_classes)
     """
     def __init__(self, num_classes=4):
-        super(ResNet18, self).__init__()
+        super(ResNet50, self).__init__()
 
         self.in_channels = 64
 
-        # Stem: 7x7 conv + maxpool (224 -> 56)
+        # Stem: initial 7x7 conv + maxpool (224 -> 56)
         self.stem = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(64),
@@ -608,21 +667,21 @@ class ResNet18(nn.Module):
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         )
 
-        # 4 residual stages — [2,2,2,2] blocks, channels double each stage
-        self.layer1 = self._make_layer(out_channels=64,  num_blocks=2, stride=1)
-        self.layer2 = self._make_layer(out_channels=128, num_blocks=2, stride=2)
-        self.layer3 = self._make_layer(out_channels=256, num_blocks=2, stride=2)
-        self.layer4 = self._make_layer(out_channels=512, num_blocks=2, stride=2)
+        # 4 residual stages
+        # Stage 1: no spatial downsampling (stride=1), 64 base -> 256 out channels
+        self.layer1 = self._make_layer(out_channels=64,  num_blocks=3, stride=1)
+        # Stage 2: spatial downsampling (stride=2), 128 base -> 512 out channels
+        self.layer2 = self._make_layer(out_channels=128, num_blocks=4, stride=2)
+        # Stage 3: spatial downsampling (stride=2), 256 base -> 1024 out channels
+        self.layer3 = self._make_layer(out_channels=256, num_blocks=6, stride=2)
+        # Stage 4: spatial downsampling (stride=2), 512 base -> 2048 out channels
+        self.layer4 = self._make_layer(out_channels=512, num_blocks=3, stride=2)
 
         # Head
         self.avgpool    = nn.AdaptiveAvgPool2d((1, 1))
-        # expansion=1 so final feature vector is 512, not 2048
-        self.classifier = nn.Sequential(
-            nn.Dropout(p=0.3),   # Light dropout: helps on small datasets
-            nn.Linear(512 * BasicBlock.expansion, num_classes)
-        )
+        self.classifier = nn.Linear(512 * ResidualBlock.expansion, num_classes)
 
-        # Kaiming initialization
+        # Weight initialization
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -631,20 +690,28 @@ class ResNet18(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def _make_layer(self, out_channels, num_blocks, stride):
+        """
+        Builds one residual stage.
+        The first block handles any change in spatial size or channel count
+        via a downsample shortcut. Remaining blocks keep dimensions unchanged.
+        """
         downsample = None
 
-        if stride != 1 or self.in_channels != out_channels * BasicBlock.expansion:
+        # Downsample shortcut needed if stride != 1 (spatial change)
+        # or if channels don't match (first block of each stage)
+        if stride != 1 or self.in_channels != out_channels * ResidualBlock.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels * BasicBlock.expansion,
+                nn.Conv2d(self.in_channels, out_channels * ResidualBlock.expansion,
                           kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels * BasicBlock.expansion)
+                nn.BatchNorm2d(out_channels * ResidualBlock.expansion)
             )
 
-        layers = [BasicBlock(self.in_channels, out_channels, stride, downsample)]
-        self.in_channels = out_channels * BasicBlock.expansion
+        layers = [ResidualBlock(self.in_channels, out_channels, stride, downsample)]
+        self.in_channels = out_channels * ResidualBlock.expansion
 
+        # Remaining blocks: stride=1, no downsampling needed
         for _ in range(1, num_blocks):
-            layers.append(BasicBlock(self.in_channels, out_channels))
+            layers.append(ResidualBlock(self.in_channels, out_channels))
 
         return nn.Sequential(*layers)
 
@@ -660,69 +727,72 @@ class ResNet18(nn.Module):
         return x
 
 
-resnet18 = ResNet18(num_classes=num_classes).to(dv)
+resnet50 = ResNet50(num_classes=num_classes).to(dv)
+if os.path.exists("best_resnet50.pth"):
+    resnet50.load_state_dict(torch.load("best_resnet50.pth"))
+    print("Loaded best_resnet50.pth")
+else:
+    print("best_resnet50.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
 # ## Training
 
 # %%
-learning_rate = 1e-2
-optimizer = torch.optim.SGD(
-    resnet18.parameters(),
-    lr=learning_rate,
-    momentum=0.9,
-    weight_decay=1e-4
-)
+learning_rate = 1e-3
+optimizer = torch.optim.SGD(resnet50.parameters(), lr=learning_rate, momentum=0.9)
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=100, eta_min=1e-6
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.7, patience=5, 
+    min_lr=1e-6
 )
 
 # Evaluate loaded model to establish baseline
-resnet18.eval()
+resnet50.eval()
 baseline_preds, baseline_true = [], []
 with torch.no_grad():
     for images, labels in val_dataloader:
         images, labels = images.to(dv), labels.to(dv)
-        outputs = resnet18(images)
+        outputs = resnet50(images)
         _, predicted = torch.max(outputs.data, 1)
         baseline_preds.extend(predicted.cpu().numpy())
         baseline_true.extend(labels.cpu().numpy())
 best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
 print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
 
-num_epochs = 100
+num_epochs = 50
 train_losses = []
 val_losses = []
-best_model_path = "best_resnet18.pth"
+best_model_path = "best_resnet50.pth"
 
-print("Starting ResNet18 training...")
+print("Starting ResNet50 training...")
 for epoch in range(num_epochs):
-    resnet18.train()
+    # Training phase
+    resnet50.train()
     epoch_loss = 0.0
 
     for images, labels in train_dataloader:
         images, labels = images.to(dv), labels.to(dv)
-        outputs = resnet18(images)
+        outputs = resnet50(images)
         loss = criterion(outputs, labels)
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(resnet18.parameters(), max_norm=1.0)
         optimizer.step()
+
         epoch_loss += loss.item()
 
     avg_train_loss = epoch_loss / len(train_dataloader)
     train_losses.append(avg_train_loss)
 
-    resnet18.eval()
+    # Validation phase
+    resnet50.eval()
     val_epoch_loss = 0.0
     val_preds, val_true = [], []
     with torch.no_grad():
         for images, labels in val_dataloader:
             images, labels = images.to(dv), labels.to(dv)
-            outputs = resnet18(images)
+            outputs = resnet50(images)
             loss = criterion(outputs, labels)
             val_epoch_loss += loss.item()
 
@@ -737,10 +807,10 @@ for epoch in range(num_epochs):
 
     if val_accuracy > best_val_accuracy:
         best_val_accuracy = val_accuracy
-        torch.save(resnet18.state_dict(), best_model_path)
+        torch.save(resnet50.state_dict(), best_model_path)
         print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
 
-    scheduler.step()
+    scheduler.step(avg_val_loss)
 
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
@@ -879,13 +949,16 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
         'test_loss': test_loss
     }
 
-# Evaluate the DenseNet121 model
-vgg16.load_state_dict(torch.load("./saved/best_vgg16.pth"))
-densenet121.load_state_dict(torch.load("./saved/best_densenet121.pth"))
+# Evaluate the models
+if os.path.exists("best_vgg16.pth"):
+    vgg16.load_state_dict(torch.load("best_vgg16.pth"))
+if os.path.exists("best_densenet121.pth"):
+    densenet121.load_state_dict(torch.load("best_densenet121.pth"))
+if os.path.exists("best_resnet50.pth"):
+    resnet50.load_state_dict(torch.load("best_resnet50.pth"))
 vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
 densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
-resnet18.load_state_dict(torch.load("best_resnet18.pth"))
-resnet18_results = evaluate_model(resnet18, "ResNet18", val_dataloader, test_dataloader, criterion, dv, class_names)
+resnet50_results = evaluate_model(resnet50, "ResNet50", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
 # %%
