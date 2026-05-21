@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: cv_venv (3.14.4)
 #     language: python
@@ -882,18 +882,8 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
     
     print(f"\nCONFUSION MATRICES (TEXT):")
     
-    # Text-based confusion matrices
     val_cm = confusion_matrix(val_true, val_preds)
     test_cm = confusion_matrix(test_true, test_preds)
-    
-    print(f"\nValidation Confusion Matrix:")
-    import pandas as pd
-    val_cm_df = pd.DataFrame(val_cm, index=class_names, columns=[f'Pred_{c}' for c in class_names])
-    print(val_cm_df)
-    
-    print(f"\nTest Confusion Matrix:")
-    test_cm_df = pd.DataFrame(test_cm, index=class_names, columns=[f'Pred_{c}' for c in class_names])
-    print(test_cm_df)
     
     print(f"\nCONFUSION MATRICES (HEATMAPS):")
     
