@@ -932,7 +932,8 @@ criterion = nn.CrossEntropyLoss()
 # ## Training
 
 # %%
-learning_rate = 1e-2
+learning_rate = 1e-3   # Lower start than ResNet/Inception — MobileNet's
+                       # depthwise convs are more sensitive to large LR steps
 
 optimizer = torch.optim.SGD(
     mobilenetv2.parameters(),
@@ -941,157 +942,87 @@ optimizer = torch.optim.SGD(
     weight_decay=1e-4
 )
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+# Warmup for 5 epochs then cosine decay.
+# The warmup lets depthwise and pointwise convs begin co-adapting
+# at a safe LR before the main training phase kicks in.
+def warmup_cosine_schedule(epoch, warmup_epochs=5, T_max=100):
+    if epoch < warmup_epochs:
+        return (epoch + 1) / warmup_epochs   # Linear warmup: 0.2 -> 1.0
+    progress = (epoch - warmup_epochs) / (T_max - warmup_epochs)
+    return 0.5 * (1 + np.cos(np.pi * progress))  # Cosine decay after warmup
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(
     optimizer,
-    T_max=100,
-    eta_min=1e-6
+    lr_lambda=warmup_cosine_schedule
 )
 
-# Evaluate loaded model to establish baseline
 mobilenetv2.eval()
-
-baseline_preds = []
-baseline_true = []
-
+baseline_preds, baseline_true = [], []
 with torch.no_grad():
-
     for images, labels in val_dataloader:
-
-        images = images.to(dv)
-        labels = labels.to(dv)
-
+        images, labels = images.to(dv), labels.to(dv)
         outputs = mobilenetv2(images)
-
         _, predicted = torch.max(outputs.data, 1)
-
         baseline_preds.extend(predicted.cpu().numpy())
         baseline_true.extend(labels.cpu().numpy())
-
-best_val_accuracy = accuracy_score(
-    baseline_true,
-    baseline_preds
-)
-
-print(
-    f"Loaded model baseline validation accuracy: "
-    f"{best_val_accuracy:.4f}\n"
-)
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
 
 num_epochs = 100
-
 train_losses = []
 val_losses = []
-
 best_model_path = "best_mobilenetv2.pth"
 
 print("Starting MobileNetV2 training...")
-
 for epoch in range(num_epochs):
-
-    # Training
     mobilenetv2.train()
-
     epoch_loss = 0.0
 
     for images, labels in train_dataloader:
-
-        images = images.to(dv)
-        labels = labels.to(dv)
-
+        images, labels = images.to(dv), labels.to(dv)
         outputs = mobilenetv2(images)
-
         loss = criterion(outputs, labels)
 
         optimizer.zero_grad()
-
         loss.backward()
-
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(
-            mobilenetv2.parameters(),
-            max_norm=1.0
-        )
-
+        torch.nn.utils.clip_grad_norm_(mobilenetv2.parameters(), max_norm=1.0)
         optimizer.step()
-
         epoch_loss += loss.item()
 
     avg_train_loss = epoch_loss / len(train_dataloader)
-
     train_losses.append(avg_train_loss)
 
-    # Validation
     mobilenetv2.eval()
-
     val_epoch_loss = 0.0
-
-    val_preds = []
-    val_true = []
-
+    val_preds, val_true = [], []
     with torch.no_grad():
-
         for images, labels in val_dataloader:
-
-            images = images.to(dv)
-            labels = labels.to(dv)
-
+            images, labels = images.to(dv), labels.to(dv)
             outputs = mobilenetv2(images)
-
             loss = criterion(outputs, labels)
-
             val_epoch_loss += loss.item()
-
             _, predicted = torch.max(outputs.data, 1)
-
             val_preds.extend(predicted.cpu().numpy())
             val_true.extend(labels.cpu().numpy())
 
     avg_val_loss = val_epoch_loss / len(val_dataloader)
-
     val_losses.append(avg_val_loss)
+    val_accuracy = accuracy_score(val_true, val_preds)
 
-    val_accuracy = accuracy_score(
-        val_true,
-        val_preds
-    )
-
-    # Save best model
     if val_accuracy > best_val_accuracy:
-
         best_val_accuracy = val_accuracy
+        torch.save(mobilenetv2.state_dict(), best_model_path)
+        print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
 
-        torch.save(
-            mobilenetv2.state_dict(),
-            best_model_path
-        )
-
-        print(
-            f"  → Model saved! "
-            f"(Val Accuracy: {val_accuracy:.4f})"
-        )
-
-    # Update scheduler
     scheduler.step()
 
-    # Logging
     if (epoch + 1) % 5 == 0:
-
         current_lr = optimizer.param_groups[0]['lr']
-
-        print(
-            f"Epoch [{epoch+1}/{num_epochs}], "
-            f"Train Loss: {avg_train_loss:.4f}, "
-            f"Val Loss: {avg_val_loss:.4f}, "
-            f"Val Acc: {val_accuracy:.4f}, "
-            f"LR: {current_lr:.6f}"
-        )
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, "
+              f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
 
 print("Training complete!")
-
-print(
-    f"Best validation accuracy: "
-    f"{best_val_accuracy:.4f}"
-)
+print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 
 
 # %% [markdown]
