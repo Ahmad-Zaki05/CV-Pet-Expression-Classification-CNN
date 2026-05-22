@@ -819,59 +819,35 @@ class InvertedResidual(nn.Module):
         self.stride = stride
         hidden_dim = in_channels * expand_ratio
 
-        # Residual connection condition
-        self.use_residual = (
-            stride == 1 and in_channels == out_channels
-        )
+        self.use_residual = (stride == 1 and in_channels == out_channels)
 
         layers = []
 
-        # Expansion layer
         if expand_ratio != 1:
             layers.extend([
-                nn.Conv2d(
-                    in_channels,
-                    hidden_dim,
-                    kernel_size=1,
-                    bias=False
-                ),
+                nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=False),
                 nn.BatchNorm2d(hidden_dim),
                 nn.ReLU6(inplace=True)
             ])
 
-        # Depthwise convolution
         layers.extend([
-            nn.Conv2d(
-                hidden_dim,
-                hidden_dim,
-                kernel_size=3,
-                stride=stride,
-                padding=1,
-                groups=hidden_dim,
-                bias=False
-            ),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=stride,
+                      padding=1, groups=hidden_dim, bias=False),
             nn.BatchNorm2d(hidden_dim),
             nn.ReLU6(inplace=True)
         ])
 
-        # Projection layer (Linear Bottleneck)
         layers.extend([
-            nn.Conv2d(
-                hidden_dim,
-                out_channels,
-                kernel_size=1,
-                bias=False
-            ),
+            nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(out_channels)
+            # No activation here — linear bottleneck by design
         ])
 
         self.block = nn.Sequential(*layers)
 
     def forward(self, x):
-
         if self.use_residual:
             return x + self.block(x)
-
         return self.block(x)
 
 
@@ -879,108 +855,77 @@ class MobileNetV2(nn.Module):
     def __init__(self, num_classes=4):
         super(MobileNetV2, self).__init__()
 
-        # Initial convolution
         self.conv1 = nn.Sequential(
-            nn.Conv2d(
-                3,
-                32,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                bias=False
-            ),
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU6(inplace=True)
         )
 
-        # MobileNetV2 configuration
-        # t = expansion factor
-        # c = output channels
-        # n = number of blocks
-        # s = stride
-
+        # Reduced expansion factor (4 instead of 6) for small dataset:
+        # less intermediate width means fewer parameters the small
+        # dataset has to supervise in each depthwise conv
         config = [
             # t, c, n, s
-            [1, 16, 1, 1],
-            [6, 24, 2, 2],
-            [6, 32, 3, 2],
-            [6, 64, 4, 2],
-            [6, 96, 3, 1],
-            [6, 160, 3, 2],
-            [6, 320, 1, 1],
+            [1, 16,  1, 1],
+            [4, 24,  2, 2],   # expansion 6->4
+            [4, 32,  3, 2],   # expansion 6->4
+            [4, 64,  4, 2],   # expansion 6->4
+            [4, 96,  3, 1],   # expansion 6->4
+            [4, 160, 3, 2],   # expansion 6->4
+            [4, 320, 1, 1],   # expansion 6->4
         ]
 
         layers = []
-
         in_channels = 32
 
-        # Build inverted residual blocks
         for t, c, n, s in config:
-
             for i in range(n):
-
                 stride = s if i == 0 else 1
-
-                layers.append(
-                    InvertedResidual(
-                        in_channels,
-                        c,
-                        stride,
-                        expand_ratio=t
-                    )
-                )
-
+                layers.append(InvertedResidual(in_channels, c, stride, expand_ratio=t))
                 in_channels = c
 
         self.blocks = nn.Sequential(*layers)
 
-        # Final convolution
         self.conv2 = nn.Sequential(
-            nn.Conv2d(
-                in_channels,
-                1280,
-                kernel_size=1,
-                bias=False
-            ),
+            nn.Conv2d(in_channels, 1280, kernel_size=1, bias=False),
             nn.BatchNorm2d(1280),
             nn.ReLU6(inplace=True)
         )
 
-        # Classification layer
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Linear(1280, num_classes)
+
+        # Added Dropout before classifier, consistent with ResNet18
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=0.3),
+            nn.Linear(1280, num_classes)
+        )
+
+        # Kaiming initialization, consistent with ResNet18 and InceptionV3
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-
         x = self.conv1(x)
-
         x = self.blocks(x)
-
         x = self.conv2(x)
-
         x = self.pool(x)
-
-        x = x.view(x.size(0), -1)
-
+        x = torch.flatten(x, 1)
         x = self.classifier(x)
-
         return x
 
 
-# Create model
 mobilenetv2 = MobileNetV2(num_classes=num_classes).to(dv)
 
-# Load saved weights
 if os.path.exists("best_mobilenetv2.pth"):
-    mobilenetv2.load_state_dict(
-        torch.load("best_mobilenetv2.pth")
-    )
+    mobilenetv2.load_state_dict(torch.load("best_mobilenetv2.pth"))
     print("Loaded best_mobilenetv2.pth")
-
 else:
     print("best_mobilenetv2.pth not found, training from scratch")
 
-# Loss function
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
