@@ -9,7 +9,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: cv_venv (3.14.4)
 #     language: python
 #     name: python3
 # ---
@@ -1311,7 +1311,7 @@ class InceptionV3(nn.Module):
 
         # --- Head ---
         self.avgpool    = nn.AdaptiveAvgPool2d((1, 1))
-        self.dropout    = nn.Dropout(p=0.4)   # Inception V3 uses dropout before classifier
+        self.dropout    = nn.Dropout(p=0.5)   # Inception V3 uses dropout before classifier
         self.classifier = nn.Linear(2048, num_classes)
 
         # Kaiming initialization for conv layers, same as ResNet
@@ -1360,7 +1360,7 @@ criterion = nn.CrossEntropyLoss()
 # ## Training (InceptionV3)
 
 # %%
-learning_rate = 1e-2
+learning_rate = 1e-3
 optimizer = torch.optim.SGD(
     inceptionv3.parameters(),
     lr=learning_rate,
@@ -1368,10 +1368,9 @@ optimizer = torch.optim.SGD(
     weight_decay=1e-4
 )
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=100, eta_min=1e-6
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=12, 
 )
-
 # Evaluate loaded model to establish baseline
 inceptionv3.eval()
 baseline_preds, baseline_true = [], []
@@ -1394,6 +1393,7 @@ print("Starting Inception V3 training...")
 for epoch in range(num_epochs):
     inceptionv3.train()
     epoch_loss = 0.0
+    train_preds, train_true = [], []
 
     for images, labels in train_dataloader:
         images, labels = images.to(dv), labels.to(dv)
@@ -1405,9 +1405,15 @@ for epoch in range(num_epochs):
         #torch.nn.utils.clip_grad_norm_(inceptionv3.parameters(), max_norm=1.0)
         optimizer.step()
         epoch_loss += loss.item()
+        
+        # Track training predictions
+        _, predicted = torch.max(outputs.data, 1)
+        train_preds.extend(predicted.cpu().numpy())
+        train_true.extend(labels.cpu().numpy())
 
     avg_train_loss = epoch_loss / len(train_dataloader)
     train_losses.append(avg_train_loss)
+    train_accuracy = accuracy_score(train_true, train_preds)
 
     inceptionv3.eval()
     val_epoch_loss = 0.0
@@ -1433,11 +1439,11 @@ for epoch in range(num_epochs):
         torch.save(inceptionv3.state_dict(), best_model_path)
         print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
 
-    scheduler.step()
+    scheduler.step(avg_val_loss)
 
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, "
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
               f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
 
 print("Training complete!")
