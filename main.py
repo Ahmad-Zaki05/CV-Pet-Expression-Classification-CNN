@@ -1728,7 +1728,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 )
 
 # training loop for transfer learning
-num_epochs = 20
+num_epochs = 50
 best_val_accuracy = 0.0
 
 print("\nStarting Transfer Learning Training...\n")
