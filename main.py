@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.3
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -1145,6 +1145,408 @@ print(
 
 
 # %% [markdown]
+# # InceptionV3
+
+# %%
+class BasicConv2d(nn.Module):
+    """
+    Reusable Conv -> BN -> ReLU building block used throughout Inception V3.
+    Almost every convolution in the network uses this exact pattern,
+    so factoring it out keeps the code clean and consistent.
+    """
+    def __init__(self, in_channels, out_channels, **kwargs):
+        super(BasicConv2d, self).__init__()
+        # bias=False because BN already handles the bias term
+        self.conv = nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
+        self.bn   = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.bn(self.conv(x)))
+
+
+class InceptionA(nn.Module):
+    """
+    Inception module used in the early stages of the network.
+    Four parallel branches are concatenated along the channel dimension:
+      - Branch 1: single 1x1 conv
+      - Branch 2: 1x1 conv -> 5x5 conv
+      - Branch 3: 1x1 conv -> two 3x3 convs (cheaper than one 5x5)
+      - Branch 4: avg pool -> 1x1 conv
+    The pool_features parameter controls branch 4 output size and varies
+    across the three InceptionA modules in the network.
+    """
+    def __init__(self, in_channels, pool_features):
+        super(InceptionA, self).__init__()
+
+        # Branch 1: simple 1x1
+        self.branch1 = BasicConv2d(in_channels, 64, kernel_size=1)
+
+        # Branch 2: 1x1 -> 5x5
+        self.branch2 = nn.Sequential(
+            BasicConv2d(in_channels, 48, kernel_size=1),
+            BasicConv2d(48, 64, kernel_size=5, padding=2)
+        )
+
+        # Branch 3: 1x1 -> 3x3 -> 3x3  (factorized 5x5)
+        self.branch3 = nn.Sequential(
+            BasicConv2d(in_channels, 64, kernel_size=1),
+            BasicConv2d(64, 96, kernel_size=3, padding=1),
+            BasicConv2d(96, 96, kernel_size=3, padding=1)
+        )
+
+        # Branch 4: avg pool -> 1x1
+        self.branch4 = nn.Sequential(
+            nn.AvgPool2d(kernel_size=3, stride=1, padding=1),
+            BasicConv2d(in_channels, pool_features, kernel_size=1)
+        )
+
+    def forward(self, x):
+        b1 = self.branch1(x)
+        b2 = self.branch2(x)
+        b3 = self.branch3(x)
+        b4 = self.branch4(x)
+        # Concatenate all branches along channel dimension
+        return torch.cat([b1, b2, b3, b4], dim=1)
+
+
+class InceptionB(nn.Module):
+    """
+    Grid reduction module: reduces spatial dimensions from 35x35 -> 17x17.
+    Two branches (no pooling branch), then a max pool branch:
+      - Branch 1: 1x1 -> 3x3 with stride=2 (spatial downsampling)
+      - Branch 2: 1x1 -> 3x3 -> 3x3 with stride=2
+      - Branch 3: max pool stride=2
+    Stride=2 in branches 1 and 2 (instead of a separate pooling layer)
+    is how Inception reduces spatial size without losing information.
+    """
+    def __init__(self, in_channels):
+        super(InceptionB, self).__init__()
+
+        self.branch1 = BasicConv2d(in_channels, 384, kernel_size=3, stride=2)
+
+        self.branch2 = nn.Sequential(
+            BasicConv2d(in_channels, 64,  kernel_size=1),
+            BasicConv2d(64,          96,  kernel_size=3, padding=1),
+            BasicConv2d(96,          96,  kernel_size=3, stride=2)
+        )
+
+        self.branch3 = nn.MaxPool2d(kernel_size=3, stride=2)
+
+    def forward(self, x):
+        b1 = self.branch1(x)
+        b2 = self.branch2(x)
+        b3 = self.branch3(x)
+        return torch.cat([b1, b2, b3], dim=1)
+
+
+class InceptionC(nn.Module):
+    """
+    Factorized convolution module used in the middle stages (17x17 grid).
+    The key idea: an nxn convolution is factorized into a 1xn followed by
+    an nx1 convolution. This gives the same receptive field at lower cost.
+    For example, one 7x7 = 49 multiplications, but 1x7 + 7x1 = 14.
+    channels_7x7 controls the intermediate channel count and increases
+    across the four InceptionC modules (128 -> 160 -> 160 -> 192).
+    """
+    def __init__(self, in_channels, channels_7x7):
+        super(InceptionC, self).__init__()
+        c7 = channels_7x7
+
+        # Branch 1: 1x1
+        self.branch1 = BasicConv2d(in_channels, 192, kernel_size=1)
+
+        # Branch 2: 1x1 -> 1x7 -> 7x1
+        self.branch2 = nn.Sequential(
+            BasicConv2d(in_channels, c7,  kernel_size=1),
+            BasicConv2d(c7,          c7,  kernel_size=(1, 7), padding=(0, 3)),
+            BasicConv2d(c7,          192, kernel_size=(7, 1), padding=(3, 0))
+        )
+
+        # Branch 3: 1x1 -> 7x1 -> 1x7 -> 7x1 -> 1x7  (deeper factorization)
+        self.branch3 = nn.Sequential(
+            BasicConv2d(in_channels, c7,  kernel_size=1),
+            BasicConv2d(c7,          c7,  kernel_size=(7, 1), padding=(3, 0)),
+            BasicConv2d(c7,          c7,  kernel_size=(1, 7), padding=(0, 3)),
+            BasicConv2d(c7,          c7,  kernel_size=(7, 1), padding=(3, 0)),
+            BasicConv2d(c7,          192, kernel_size=(1, 7), padding=(0, 3))
+        )
+
+        # Branch 4: avg pool -> 1x1
+        self.branch4 = nn.Sequential(
+            nn.AvgPool2d(kernel_size=3, stride=1, padding=1),
+            BasicConv2d(in_channels, 192, kernel_size=1)
+        )
+
+    def forward(self, x):
+        b1 = self.branch1(x)
+        b2 = self.branch2(x)
+        b3 = self.branch3(x)
+        b4 = self.branch4(x)
+        return torch.cat([b1, b2, b3, b4], dim=1)
+
+
+class InceptionD(nn.Module):
+    """
+    Second grid reduction module: 17x17 -> 8x8.
+    Same philosophy as InceptionB — uses strided convolutions
+    across branches rather than a separate downsampling layer.
+    """
+    def __init__(self, in_channels):
+        super(InceptionD, self).__init__()
+
+        self.branch1 = nn.Sequential(
+            BasicConv2d(in_channels, 192, kernel_size=1),
+            BasicConv2d(192,         320, kernel_size=3, stride=2)
+        )
+
+        self.branch2 = nn.Sequential(
+            BasicConv2d(in_channels, 192, kernel_size=1),
+            BasicConv2d(192,         192, kernel_size=(1, 7), padding=(0, 3)),
+            BasicConv2d(192,         192, kernel_size=(7, 1), padding=(3, 0)),
+            BasicConv2d(192,         192, kernel_size=3,      stride=2)
+        )
+
+        self.branch3 = nn.MaxPool2d(kernel_size=3, stride=2)
+
+    def forward(self, x):
+        b1 = self.branch1(x)
+        b2 = self.branch2(x)
+        b3 = self.branch3(x)
+        return torch.cat([b1, b2, b3], dim=1)
+
+
+class InceptionE(nn.Module):
+    """
+    Expanded filter bank module used in the final stages (8x8 grid).
+    Branch 2 and 3 each split into two parallel 1x3 and 3x1 convolutions
+    whose outputs are concatenated. This maximizes the variety of feature
+    detectors at the coarsest spatial scale before classification.
+    """
+    def __init__(self, in_channels):
+        super(InceptionE, self).__init__()
+
+        # Branch 1: 1x1
+        self.branch1 = BasicConv2d(in_channels, 320, kernel_size=1)
+
+        # Branch 2: 1x1 -> split into 1x3 and 3x1 in parallel
+        self.branch2_reduce = BasicConv2d(in_channels, 384, kernel_size=1)
+        self.branch2a = BasicConv2d(384, 384, kernel_size=(1, 3), padding=(0, 1))
+        self.branch2b = BasicConv2d(384, 384, kernel_size=(3, 1), padding=(1, 0))
+
+        # Branch 3: 1x1 -> 3x3 -> split into 1x3 and 3x1 in parallel
+        self.branch3_reduce = BasicConv2d(in_channels, 448, kernel_size=1)
+        self.branch3_conv   = BasicConv2d(448,          384, kernel_size=3, padding=1)
+        self.branch3a = BasicConv2d(384, 384, kernel_size=(1, 3), padding=(0, 1))
+        self.branch3b = BasicConv2d(384, 384, kernel_size=(3, 1), padding=(1, 0))
+
+        # Branch 4: avg pool -> 1x1
+        self.branch4 = nn.Sequential(
+            nn.AvgPool2d(kernel_size=3, stride=1, padding=1),
+            BasicConv2d(in_channels, 192, kernel_size=1)
+        )
+
+    def forward(self, x):
+        b1 = self.branch1(x)
+
+        b2 = self.branch2_reduce(x)
+        b2 = torch.cat([self.branch2a(b2), self.branch2b(b2)], dim=1)  # 768 ch
+
+        b3 = self.branch3_conv(self.branch3_reduce(x))
+        b3 = torch.cat([self.branch3a(b3), self.branch3b(b3)], dim=1)  # 768 ch
+
+        b4 = self.branch4(x)
+
+        return torch.cat([b1, b2, b3, b4], dim=1)  # 320+768+768+192 = 2048 ch
+
+
+class InceptionV3(nn.Module):
+    """
+    Inception V3: full architecture as described in
+    'Rethinking the Inception Architecture for Computer Vision' (Szegedy et al. 2016).
+
+    Spatial flow:
+      Input 224x224 -> Stem -> 26x26 -> InceptionA x3 -> InceptionB
+      -> 12x12 -> InceptionC x4 -> InceptionD -> 5x5 -> InceptionE x2
+      -> AvgPool -> classifier
+
+    Note: the original paper uses 299x299 input. We use 224x224 to stay
+    consistent with the rest of the codebase. The spatial dimensions above
+    reflect 224x224 input accordingly.
+    """
+    def __init__(self, num_classes=4):
+        super(InceptionV3, self).__init__()
+
+        # --- Stem ---
+        # Aggressively reduces 224x224 down before the Inception modules begin.
+        # Uses strided convs rather than pooling to preserve more information.
+        self.stem = nn.Sequential(
+            BasicConv2d(3,   32,  kernel_size=3, stride=2),           # 224->111
+            BasicConv2d(32,  32,  kernel_size=3),                      # 111->109
+            BasicConv2d(32,  64,  kernel_size=3, padding=1),           # 109->109
+            nn.MaxPool2d(kernel_size=3, stride=2),                     # 109->54
+            BasicConv2d(64,  80,  kernel_size=1),
+            BasicConv2d(80,  192, kernel_size=3),                      # 54->52
+            nn.MaxPool2d(kernel_size=3, stride=2)                      # 52->26
+        )
+
+        # --- InceptionA x3 (on 26x26 grid) ---
+        # pool_features varies: controls how many channels the avg pool
+        # branch contributes; increases to maintain total output channels
+        # as the network deepens (256 -> 288 -> 288)
+        self.inceptionA1 = InceptionA(192, pool_features=32)   # out: 256ch
+        self.inceptionA2 = InceptionA(256, pool_features=64)   # out: 288ch
+        self.inceptionA3 = InceptionA(288, pool_features=64)   # out: 288ch
+
+        # --- InceptionB: 26x26 -> 12x12 ---
+        self.inceptionB = InceptionB(288)                       # out: 768ch
+
+        # --- InceptionC x4 (on 12x12 grid) ---
+        # channels_7x7 increases from 128 to 192 across the four modules,
+        # giving the factorized branches progressively more capacity
+        self.inceptionC1 = InceptionC(768, channels_7x7=128)   # out: 768ch
+        self.inceptionC2 = InceptionC(768, channels_7x7=160)   # out: 768ch
+        self.inceptionC3 = InceptionC(768, channels_7x7=160)   # out: 768ch
+        self.inceptionC4 = InceptionC(768, channels_7x7=192)   # out: 768ch
+
+        # --- InceptionD: 12x12 -> 5x5 ---
+        self.inceptionD = InceptionD(768)                       # out: 1280ch
+
+        # --- InceptionE x2 (on 5x5 grid) ---
+        self.inceptionE1 = InceptionE(1280)                     # out: 2048ch
+        self.inceptionE2 = InceptionE(2048)                     # out: 2048ch
+
+        # --- Head ---
+        self.avgpool    = nn.AdaptiveAvgPool2d((1, 1))
+        self.dropout    = nn.Dropout(p=0.4)   # Inception V3 uses dropout before classifier
+        self.classifier = nn.Linear(2048, num_classes)
+
+        # Kaiming initialization for conv layers, same as ResNet
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = self.stem(x)
+
+        x = self.inceptionA1(x)
+        x = self.inceptionA2(x)
+        x = self.inceptionA3(x)
+
+        x = self.inceptionB(x)
+
+        x = self.inceptionC1(x)
+        x = self.inceptionC2(x)
+        x = self.inceptionC3(x)
+        x = self.inceptionC4(x)
+
+        x = self.inceptionD(x)
+
+        x = self.inceptionE1(x)
+        x = self.inceptionE2(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.dropout(x)
+        x = self.classifier(x)
+        return x
+
+
+inceptionv3 = InceptionV3(num_classes=num_classes).to(dv)
+criterion = nn.CrossEntropyLoss()
+
+# %% [markdown]
+# ## Training
+
+# %%
+learning_rate = 1e-2
+optimizer = torch.optim.SGD(
+    inceptionv3.parameters(),
+    lr=learning_rate,
+    momentum=0.9,
+    weight_decay=1e-4
+)
+
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=100, eta_min=1e-6
+)
+
+# Evaluate loaded model to establish baseline
+inceptionv3.eval()
+baseline_preds, baseline_true = [], []
+with torch.no_grad():
+    for images, labels in val_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = inceptionv3(images)
+        _, predicted = torch.max(outputs.data, 1)
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+best_val_accuracy = accuracy_score(baseline_true, baseline_preds)
+print(f"Loaded model baseline validation accuracy: {best_val_accuracy:.4f}\n")
+
+num_epochs = 100
+train_losses = []
+val_losses = []
+best_model_path = "best_inceptionv3.pth"
+
+print("Starting Inception V3 training...")
+for epoch in range(num_epochs):
+    inceptionv3.train()
+    epoch_loss = 0.0
+
+    for images, labels in train_dataloader:
+        images, labels = images.to(dv), labels.to(dv)
+        outputs = inceptionv3(images)
+        loss = criterion(outputs, labels)
+
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(inceptionv3.parameters(), max_norm=1.0)
+        optimizer.step()
+        epoch_loss += loss.item()
+
+    avg_train_loss = epoch_loss / len(train_dataloader)
+    train_losses.append(avg_train_loss)
+
+    inceptionv3.eval()
+    val_epoch_loss = 0.0
+    val_preds, val_true = [], []
+    with torch.no_grad():
+        for images, labels in val_dataloader:
+            images, labels = images.to(dv), labels.to(dv)
+            outputs = inceptionv3(images)
+            loss = criterion(outputs, labels)
+            val_epoch_loss += loss.item()
+
+            _, predicted = torch.max(outputs.data, 1)
+            val_preds.extend(predicted.cpu().numpy())
+            val_true.extend(labels.cpu().numpy())
+
+    avg_val_loss = val_epoch_loss / len(val_dataloader)
+    val_losses.append(avg_val_loss)
+
+    val_accuracy = accuracy_score(val_true, val_preds)
+
+    if val_accuracy > best_val_accuracy:
+        best_val_accuracy = val_accuracy
+        torch.save(inceptionv3.state_dict(), best_model_path)
+        print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
+
+    scheduler.step()
+
+    if (epoch + 1) % 5 == 0:
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, "
+              f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
+
+print("Training complete!")
+print(f"Best validation accuracy: {best_val_accuracy:.4f}")
+
+
+# %% [markdown]
 # # Evaluation
 
 # %%
@@ -1275,6 +1677,9 @@ if os.path.exists("best_resnet18.pth"):
 if os.path.exists("best_mobilenetv2.pth"):
     mobilenetv2.load_state_dict(torch.load("best_mobilenetv2.pth"))
     mobilenetv2_results = evaluate_model(mobilenetv2, "MobileNetV2", val_dataloader, test_dataloader, criterion, dv, class_names)
+if os.path.exists("best_inceptionv3.pth"):
+    inceptionv3.load_state_dict(torch.load("best_inceptionv3.pth"))
+    inceptionv3_results = evaluate_model(inceptionv3, "InceptionV3", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
 # %%
