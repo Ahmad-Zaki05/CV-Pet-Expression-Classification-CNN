@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -977,6 +977,7 @@ print("Starting MobileNetV2 training...")
 for epoch in range(num_epochs):
     mobilenetv2.train()
     epoch_loss = 0.0
+    train_preds, train_true = [], []
 
     for images, labels in train_dataloader:
         images, labels = images.to(dv), labels.to(dv)
@@ -985,12 +986,17 @@ for epoch in range(num_epochs):
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(mobilenetv2.parameters(), max_norm=1.0)
+        #torch.nn.utils.clip_grad_norm_(mobilenetv2.parameters(), max_norm=10.0)
         optimizer.step()
         epoch_loss += loss.item()
+        
+        _, predicted = torch.max(outputs.data, 1)
+        train_preds.extend(predicted.cpu().numpy())
+        train_true.extend(labels.cpu().numpy())
 
     avg_train_loss = epoch_loss / len(train_dataloader)
     train_losses.append(avg_train_loss)
+    train_accuracy = accuracy_score(train_true, train_preds)
 
     mobilenetv2.eval()
     val_epoch_loss = 0.0
@@ -1018,7 +1024,7 @@ for epoch in range(num_epochs):
 
     if (epoch + 1) % 5 == 0:
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, "
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Train Acc: {train_accuracy:.4f}, "
               f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
 
 print("Training complete!")
@@ -1390,7 +1396,7 @@ for epoch in range(num_epochs):
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(inceptionv3.parameters(), max_norm=1.0)
+        #torch.nn.utils.clip_grad_norm_(inceptionv3.parameters(), max_norm=1.0)
         optimizer.step()
         epoch_loss += loss.item()
 
