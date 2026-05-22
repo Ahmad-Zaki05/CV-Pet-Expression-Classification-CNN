@@ -9,7 +9,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
 #   kernelspec:
-#     display_name: cv_venv (3.14.4)
+#     display_name: Python 3
 #     language: python
 #     name: python3
 # ---
@@ -803,6 +803,348 @@ print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 
 
 # %% [markdown]
+# # MobileNet
+
+# %%
+# Inverted Residual Block
+class InvertedResidual(nn.Module):
+    def __init__(self, in_channels, out_channels, stride, expand_ratio):
+        super(InvertedResidual, self).__init__()
+
+        self.stride = stride
+        hidden_dim = in_channels * expand_ratio
+
+        # Residual connection condition
+        self.use_residual = (
+            stride == 1 and in_channels == out_channels
+        )
+
+        layers = []
+
+        # Expansion layer
+        if expand_ratio != 1:
+            layers.extend([
+                nn.Conv2d(
+                    in_channels,
+                    hidden_dim,
+                    kernel_size=1,
+                    bias=False
+                ),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True)
+            ])
+
+        # Depthwise convolution
+        layers.extend([
+            nn.Conv2d(
+                hidden_dim,
+                hidden_dim,
+                kernel_size=3,
+                stride=stride,
+                padding=1,
+                groups=hidden_dim,
+                bias=False
+            ),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU6(inplace=True)
+        ])
+
+        # Projection layer (Linear Bottleneck)
+        layers.extend([
+            nn.Conv2d(
+                hidden_dim,
+                out_channels,
+                kernel_size=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(out_channels)
+        ])
+
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x):
+
+        if self.use_residual:
+            return x + self.block(x)
+
+        return self.block(x)
+
+
+class MobileNetV2(nn.Module):
+    def __init__(self, num_classes=4):
+        super(MobileNetV2, self).__init__()
+
+        # Initial convolution
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(
+                3,
+                32,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(32),
+            nn.ReLU6(inplace=True)
+        )
+
+        # MobileNetV2 configuration
+        # t = expansion factor
+        # c = output channels
+        # n = number of blocks
+        # s = stride
+
+        config = [
+            # t, c, n, s
+            [1, 16, 1, 1],
+            [6, 24, 2, 2],
+            [6, 32, 3, 2],
+            [6, 64, 4, 2],
+            [6, 96, 3, 1],
+            [6, 160, 3, 2],
+            [6, 320, 1, 1],
+        ]
+
+        layers = []
+
+        in_channels = 32
+
+        # Build inverted residual blocks
+        for t, c, n, s in config:
+
+            for i in range(n):
+
+                stride = s if i == 0 else 1
+
+                layers.append(
+                    InvertedResidual(
+                        in_channels,
+                        c,
+                        stride,
+                        expand_ratio=t
+                    )
+                )
+
+                in_channels = c
+
+        self.blocks = nn.Sequential(*layers)
+
+        # Final convolution
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                1280,
+                kernel_size=1,
+                bias=False
+            ),
+            nn.BatchNorm2d(1280),
+            nn.ReLU6(inplace=True)
+        )
+
+        # Classification layer
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Linear(1280, num_classes)
+
+    def forward(self, x):
+
+        x = self.conv1(x)
+
+        x = self.blocks(x)
+
+        x = self.conv2(x)
+
+        x = self.pool(x)
+
+        x = x.view(x.size(0), -1)
+
+        x = self.classifier(x)
+
+        return x
+
+
+# Create model
+mobilenetv2 = MobileNetV2(num_classes=num_classes).to(dv)
+
+# Load saved weights
+if os.path.exists("best_mobilenetv2.pth"):
+    mobilenetv2.load_state_dict(
+        torch.load("best_mobilenetv2.pth")
+    )
+    print("Loaded best_mobilenetv2.pth")
+
+else:
+    print("best_mobilenetv2.pth not found, training from scratch")
+
+# Loss function
+criterion = nn.CrossEntropyLoss()
+
+# %% [markdown]
+# ## Training
+
+# %%
+learning_rate = 1e-2
+
+optimizer = torch.optim.SGD(
+    mobilenetv2.parameters(),
+    lr=learning_rate,
+    momentum=0.9,
+    weight_decay=1e-4
+)
+
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=100,
+    eta_min=1e-6
+)
+
+# Evaluate loaded model to establish baseline
+mobilenetv2.eval()
+
+baseline_preds = []
+baseline_true = []
+
+with torch.no_grad():
+
+    for images, labels in val_dataloader:
+
+        images = images.to(dv)
+        labels = labels.to(dv)
+
+        outputs = mobilenetv2(images)
+
+        _, predicted = torch.max(outputs.data, 1)
+
+        baseline_preds.extend(predicted.cpu().numpy())
+        baseline_true.extend(labels.cpu().numpy())
+
+best_val_accuracy = accuracy_score(
+    baseline_true,
+    baseline_preds
+)
+
+print(
+    f"Loaded model baseline validation accuracy: "
+    f"{best_val_accuracy:.4f}\n"
+)
+
+num_epochs = 100
+
+train_losses = []
+val_losses = []
+
+best_model_path = "best_mobilenetv2.pth"
+
+print("Starting MobileNetV2 training...")
+
+for epoch in range(num_epochs):
+
+    # Training
+    mobilenetv2.train()
+
+    epoch_loss = 0.0
+
+    for images, labels in train_dataloader:
+
+        images = images.to(dv)
+        labels = labels.to(dv)
+
+        outputs = mobilenetv2(images)
+
+        loss = criterion(outputs, labels)
+
+        optimizer.zero_grad()
+
+        loss.backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(
+            mobilenetv2.parameters(),
+            max_norm=1.0
+        )
+
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    avg_train_loss = epoch_loss / len(train_dataloader)
+
+    train_losses.append(avg_train_loss)
+
+    # Validation
+    mobilenetv2.eval()
+
+    val_epoch_loss = 0.0
+
+    val_preds = []
+    val_true = []
+
+    with torch.no_grad():
+
+        for images, labels in val_dataloader:
+
+            images = images.to(dv)
+            labels = labels.to(dv)
+
+            outputs = mobilenetv2(images)
+
+            loss = criterion(outputs, labels)
+
+            val_epoch_loss += loss.item()
+
+            _, predicted = torch.max(outputs.data, 1)
+
+            val_preds.extend(predicted.cpu().numpy())
+            val_true.extend(labels.cpu().numpy())
+
+    avg_val_loss = val_epoch_loss / len(val_dataloader)
+
+    val_losses.append(avg_val_loss)
+
+    val_accuracy = accuracy_score(
+        val_true,
+        val_preds
+    )
+
+    # Save best model
+    if val_accuracy > best_val_accuracy:
+
+        best_val_accuracy = val_accuracy
+
+        torch.save(
+            mobilenetv2.state_dict(),
+            best_model_path
+        )
+
+        print(
+            f"  → Model saved! "
+            f"(Val Accuracy: {val_accuracy:.4f})"
+        )
+
+    # Update scheduler
+    scheduler.step()
+
+    # Logging
+    if (epoch + 1) % 5 == 0:
+
+        current_lr = optimizer.param_groups[0]['lr']
+
+        print(
+            f"Epoch [{epoch+1}/{num_epochs}], "
+            f"Train Loss: {avg_train_loss:.4f}, "
+            f"Val Loss: {avg_val_loss:.4f}, "
+            f"Val Acc: {val_accuracy:.4f}, "
+            f"LR: {current_lr:.6f}"
+        )
+
+print("Training complete!")
+
+print(
+    f"Best validation accuracy: "
+    f"{best_val_accuracy:.4f}"
+)
+
+
+# %% [markdown]
 # # Evaluation
 
 # %%
@@ -923,13 +1265,16 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
 # Evaluate the models
 if os.path.exists("best_vgg16.pth"):
     vgg16.load_state_dict(torch.load("best_vgg16.pth"))
+    vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
 if os.path.exists("best_densenet121.pth"):
     densenet121.load_state_dict(torch.load("best_densenet121.pth"))
+    densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
 if os.path.exists("best_resnet18.pth"):
     resnet18.load_state_dict(torch.load("best_resnet18.pth"))
-vgg16_results = evaluate_model(vgg16, "VGG16", val_dataloader, test_dataloader, criterion, dv, class_names)
-densenet_results = evaluate_model(densenet121, "DenseNet121", val_dataloader, test_dataloader, criterion, dv, class_names)
-resnet18_results = evaluate_model(resnet18, "ResNet18", val_dataloader, test_dataloader, criterion, dv, class_names)
+    resnet18_results = evaluate_model(resnet18, "ResNet18", val_dataloader, test_dataloader, criterion, dv, class_names)
+if os.path.exists("best_mobilenetv2.pth"):
+    mobilenetv2.load_state_dict(torch.load("best_mobilenetv2.pth"))
+    mobilenetv2_results = evaluate_model(mobilenetv2, "MobileNetV2", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
 # %%
