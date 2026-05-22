@@ -26,7 +26,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.data import DataLoader, TensorDataset
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
                              confusion_matrix)
 
@@ -325,6 +325,9 @@ else:
     print("best_vgg16.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
+# %% [markdown]
+# ## Training (VGG16)
+
 # %%
 
 learning_rate = 1e-3  # Higher LR for training from scratch with batch norm
@@ -510,6 +513,9 @@ else:
     print("best_densenet121.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
+
+# %% [markdown]
+# ## Training (DenseNet121)
 
 # %%
 # Train DenseNet121
@@ -720,7 +726,7 @@ else:
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
-# ## Training
+# ## Training (ResNet18)
 
 # %%
 learning_rate = 1e-2
@@ -929,7 +935,7 @@ else:
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
-# ## Training
+# ## Training (MobileNetV2)
 
 # %%
 learning_rate = 1e-3   # Lower start than ResNet/Inception — MobileNet's
@@ -1351,7 +1357,7 @@ else:
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
-# ## Training
+# ## Training (InceptionV3)
 
 # %%
 learning_rate = 1e-2
@@ -1439,7 +1445,7 @@ print(f"Best validation accuracy: {best_val_accuracy:.4f}")
 
 
 # %% [markdown]
-# # Evaluation
+# # Evaluation (All Models)
 
 # %%
 # Network-agnostic evaluation function
@@ -1544,6 +1550,7 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
     plt.show()
     
     return {
+        'model_name': model_name,
         'val_accuracy': val_accuracy,
         'val_precision': val_precision,
         'val_recall': val_recall,
@@ -1555,6 +1562,8 @@ def evaluate_model(model, model_name, val_loader, test_loader, criterion, device
         'test_f1': test_f1,
         'test_loss': test_loss
     }
+
+vgg16_results = densenet_results = resnet18_results = mobilenetv2_results = inceptionv3_results = None
 
 # Evaluate the models
 if os.path.exists("best_vgg16.pth"):
@@ -1572,6 +1581,244 @@ if os.path.exists("best_mobilenetv2.pth"):
 if os.path.exists("best_inceptionv3.pth"):
     inceptionv3.load_state_dict(torch.load("best_inceptionv3.pth"))
     inceptionv3_results = evaluate_model(inceptionv3, "InceptionV3", val_dataloader, test_dataloader, criterion, dv, class_names)
+
+# %% [markdown]
+# # Transfer Learning
+
+# %%
+# get highest accuracy among all models with its name
+all_results = [
+    vgg16_results,
+    densenet_results,
+    resnet18_results,
+    mobilenetv2_results,
+    inceptionv3_results
+]
+
+valid_results = [
+    result for result in all_results
+    if result is not None and 'test_accuracy' in result and 'model_name' in result
+]
+
+if not valid_results:
+    raise ValueError("No valid model results found. Run the model training cells first.")
+
+best_model_results = max(valid_results, key=lambda x: x['test_accuracy'])
+best_model_name = best_model_results['model_name']
+
+print(f"\nBest model selected: {best_model_name}")
+print(f"Test Accuracy: {best_model_results['test_accuracy']:.4f}")
+
+# load the best model for transfer learning
+# each model has a different classifier layer, so we handle them separately
+if best_model_name == "VGG16":
+    # load pretrained VGG16 model with ImageNet weights
+    transfer_model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+
+    # freeze pretrained layers
+    for param in transfer_model.parameters():
+        param.requires_grad = False
+
+    # replace classifier
+    in_features = transfer_model.classifier[6].in_features
+
+    transfer_model.classifier[6] = nn.Linear(in_features, num_classes)
+
+    # train only classifier
+    optimizer = torch.optim.Adam(
+        transfer_model.classifier[6].parameters(),
+        lr=1e-3
+    )
+
+elif best_model_name == "DenseNet121":
+    transfer_model = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+
+    for param in transfer_model.parameters():
+        param.requires_grad = False
+
+    in_features = transfer_model.classifier.in_features
+
+    transfer_model.classifier = nn.Linear(in_features, num_classes)
+
+    optimizer = torch.optim.Adam(
+        transfer_model.classifier.parameters(),
+        lr=1e-3
+    )
+
+elif best_model_name == "ResNet18":
+    transfer_model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+
+    for param in transfer_model.parameters():
+        param.requires_grad = False
+
+    in_features = transfer_model.fc.in_features
+
+    transfer_model.fc = nn.Sequential(
+        nn.Dropout(0.3),
+        nn.Linear(in_features, num_classes)
+    )
+
+    optimizer = torch.optim.Adam(
+        transfer_model.fc.parameters(),
+        lr=1e-3
+    )
+
+elif best_model_name == "MobileNetV2":
+    transfer_model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.IMAGENET1K_V1)
+
+    for param in transfer_model.parameters():
+        param.requires_grad = False
+
+    in_features = transfer_model.classifier[1].in_features
+
+    transfer_model.classifier[1] = nn.Linear(in_features, num_classes)
+
+    optimizer = torch.optim.Adam(
+        transfer_model.classifier[1].parameters(),
+        lr=1e-3
+    )
+
+elif best_model_name == "InceptionV3":
+    transfer_model = models.inception_v3(weights=models.Inception_V3_Weights.IMAGENET1K_V1)
+
+    for param in transfer_model.parameters():
+        param.requires_grad = False
+
+    in_features = transfer_model.fc.in_features
+
+    transfer_model.fc = nn.Linear(in_features, num_classes)
+
+    optimizer = torch.optim.Adam(
+        transfer_model.fc.parameters(),
+        lr=1e-3
+    )
+    
+    # Override dataloaders with 299x299 for pretrained InceptionV3
+    inception_train_transform = transforms.Compose([
+        transforms.Resize((299, 299)),
+        transforms.RandAugment(num_ops=10, magnitude=3),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    inception_val_test_transform = transforms.Compose([
+        transforms.Resize((299, 299)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    inception_train_dataset = CustomSubset(full_dataset, train_indices, transform=inception_train_transform)
+    inception_val_dataset   = CustomSubset(full_dataset, val_indices,   transform=inception_val_test_transform)
+    inception_test_dataset  = CustomSubset(full_dataset, test_indices,  transform=inception_val_test_transform)
+
+    train_dataloader = DataLoader(inception_train_dataset, batch_size=BATCH_SIZE, shuffle=True,  num_workers=NUM_WORKERS, pin_memory=torch.cuda.is_available())
+    val_dataloader   = DataLoader(inception_val_dataset,   batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=torch.cuda.is_available())
+    test_dataloader  = DataLoader(inception_test_dataset,  batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=torch.cuda.is_available())
+
+# Move model to GPU/CPU
+transfer_model = transfer_model.to(dv)
+
+# loss function and scheduler
+criterion = nn.CrossEntropyLoss()
+
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.5,
+    patience=3
+)
+
+# training loop for transfer learning
+num_epochs = 20
+best_val_accuracy = 0.0
+
+print("\nStarting Transfer Learning Training...\n")
+
+for epoch in range(num_epochs):
+
+    transfer_model.train()
+
+    train_loss = 0.0
+
+    for images, labels in train_dataloader:
+
+        images = images.to(dv)
+        labels = labels.to(dv)
+
+        outputs = transfer_model(images)
+
+        # InceptionV3 returns special output object during training
+        if best_model_name == "InceptionV3":
+            outputs = outputs.logits
+
+        loss = criterion(outputs, labels)
+
+        optimizer.zero_grad()
+
+        loss.backward()
+
+        optimizer.step()
+
+        train_loss += loss.item()
+
+    avg_train_loss = train_loss / len(train_dataloader)
+
+   
+    # validation
+    transfer_model.eval()
+
+    val_loss = 0.0
+
+    val_preds = []
+    val_true = []
+
+    with torch.no_grad():
+
+        for images, labels in val_dataloader:
+
+            images = images.to(dv)
+            labels = labels.to(dv)
+
+            outputs = transfer_model(images)
+
+            if best_model_name == "InceptionV3":
+                outputs = outputs.logits
+
+            loss = criterion(outputs, labels)
+
+            val_loss += loss.item()
+
+            _, predicted = torch.max(outputs, 1)
+
+            val_preds.extend(predicted.cpu().numpy())
+            val_true.extend(labels.cpu().numpy())
+
+    avg_val_loss = val_loss / len(val_dataloader)
+
+    val_accuracy = accuracy_score(val_true, val_preds)
+
+    # Save best model
+    if val_accuracy > best_val_accuracy:
+        best_val_accuracy = val_accuracy
+        torch.save(transfer_model.state_dict(), "best_transfer_learning_model.pth")
+        print(f"  → Model saved! (Val Accuracy: {val_accuracy:.4f})")
+
+    scheduler.step(avg_val_loss)
+
+    current_lr = optimizer.param_groups[0]['lr']
+    print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, "
+            f"Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, LR: {current_lr:.6f}")
+
+print("\nTransfer Learning Training Complete!")
+print(f"Best Validation Accuracy: {best_val_accuracy:.4f}")
+
+# %% [markdown]
+# ## Evaluation (Transfer Learning)
+
+# %%
+# load best transfer learning model for final evaluation
+if os.path.exists("best_transfer_learning_model.pth"):
+    transfer_model.load_state_dict(torch.load("best_transfer_learning_model.pth"))
+    transfer_results = evaluate_model(transfer_model, f"Transfer Learning ({best_model_name})", val_dataloader, test_dataloader, criterion, dv, class_names)
 
 
 # %%
