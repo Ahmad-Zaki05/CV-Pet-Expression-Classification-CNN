@@ -712,6 +712,11 @@ class ResNet18(nn.Module):
 
 
 resnet18 = ResNet18(num_classes=num_classes).to(dv)
+if os.path.exists("best_resnet18.pth"):
+    resnet18.load_state_dict(torch.load("best_resnet18.pth"))
+    print("Loaded best_resnet18.pth")
+else:
+    print("best_resnet18.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
@@ -1456,6 +1461,11 @@ class InceptionV3(nn.Module):
 
 
 inceptionv3 = InceptionV3(num_classes=num_classes).to(dv)
+if os.path.exists("best_inceptionv3.pth"):
+    inceptionv3.load_state_dict(torch.load("best_inceptionv3.pth"))
+    print("Loaded best_inceptionv3.pth")
+else:
+    print("best_inceptionv3.pth not found, training from scratch")
 criterion = nn.CrossEntropyLoss()
 
 # %% [markdown]
